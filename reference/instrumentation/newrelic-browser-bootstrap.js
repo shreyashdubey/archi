@@ -15,33 +15,35 @@
  * ========================================================================== */
 (function () {
   'use strict';
-  var nr = window.newrelic;
-  if (!nr) { console.warn('[nr-bootstrap] agent not present'); return; }
+  var newrelicAgent = window.newrelic;
+  if (!newrelicAgent) { console.warn('[nr-bootstrap] agent not present'); return; }
 
   var body = document.body;
-  var attr = function (k, d) { return body.getAttribute(k) || d; };
+  var bodyAttr = function (attributeName, defaultValue) { return body.getAttribute(attributeName) || defaultValue; };
   var slugFromPath = function () {
-    var p = location.pathname.split('/').filter(Boolean);
-    return p[p.length - 1] || 'unknown';
+    var pathSegments = location.pathname.split('/').filter(Boolean);
+    return pathSegments[pathSegments.length - 1] || 'unknown';
   };
 
   // ---- 1. Global dimensions (attached to every event) -----------------------
-  var dims = {
-    pageType: attr('data-page-type', 'mf-detail'),
-    fundSlug: attr('data-fund-slug', slugFromPath()),
-    fundCategory: attr('data-fund-category', 'unknown'),
+  var globalDimensions = {
+    pageType: bodyAttr('data-page-type', 'mf-detail'),
+    fundSlug: bodyAttr('data-fund-slug', slugFromPath()),
+    fundCategory: bodyAttr('data-fund-category', 'unknown'),
     appVersion: window.__APP_VERSION__ || 'unknown',
     env: window.__ENV__ || 'prod',
   };
-  Object.keys(dims).forEach(function (k) { nr.setCustomAttribute(k, dims[k]); });
-  if (nr.setPageViewName) nr.setPageViewName(dims.pageType);
+  Object.keys(globalDimensions).forEach(function (dimensionName) {
+    newrelicAgent.setCustomAttribute(dimensionName, globalDimensions[dimensionName]);
+  });
+  if (newrelicAgent.setPageViewName) newrelicAgent.setPageViewName(globalDimensions.pageType);
 
   // ---- 2. Component render: success + latency (single reporter, dedup) -------
-  var seen = Object.create(null);
+  var statusByComponent = Object.create(null);
   function report(component, status, renderMs, errorMessage) {
-    if (seen[component] === 'rendered') return; // first success wins
-    seen[component] = status;
-    nr.addPageAction('ComponentRender', {
+    if (statusByComponent[component] === 'rendered') return; // first success wins
+    statusByComponent[component] = status;
+    newrelicAgent.addPageAction('ComponentRender', {
       component: component, status: status,
       renderMs: renderMs != null ? Math.round(renderMs) : null,
       errorMessage: errorMessage || null,
@@ -51,57 +53,65 @@
   // 2a. Markup components via Element Timing API.
   if ('PerformanceObserver' in window) {
     try {
-      new PerformanceObserver(function (list) {
-        list.getEntries().forEach(function (e) {
-          if (e.identifier) report(e.identifier, 'rendered', e.renderTime || e.loadTime);
+      new PerformanceObserver(function (entryList) {
+        entryList.getEntries().forEach(function (elementTiming) {
+          if (elementTiming.identifier) {
+            report(elementTiming.identifier, 'rendered', elementTiming.renderTime || elementTiming.loadTime);
+          }
         });
       }).observe({ type: 'element', buffered: true });
-    } catch (_) {}
+    } catch (observerError) {}
   }
 
   // 2b. Manual hook for data-driven components (chart/calculator): call when the
   //     component has data applied to the DOM (true time-to-usable).
-  window.nrComponent = function (component, opts) {
-    opts = opts || {};
-    var ms = opts.renderMs;
-    if (ms == null && opts.startMark != null) ms = performance.now() - opts.startMark;
-    report(component, opts.status || 'rendered', ms, opts.error);
+  window.nrComponent = function (component, options) {
+    options = options || {};
+    var renderMs = options.renderMs;
+    if (renderMs == null && options.startMark != null) renderMs = performance.now() - options.startMark;
+    report(component, options.status || 'rendered', renderMs, options.error);
   };
 
   // 2c. Uncaught errors → mark nearest tagged component as errored.
-  window.addEventListener('error', function (ev) {
-    var el = ev.target && ev.target.closest && ev.target.closest('[data-nr-component]');
-    if (el) report(el.getAttribute('data-nr-component'), 'error', null, String(ev.message || 'error'));
+  window.addEventListener('error', function (errorEvent) {
+    var componentElement = errorEvent.target && errorEvent.target.closest && errorEvent.target.closest('[data-nr-component]');
+    if (componentElement) {
+      report(componentElement.getAttribute('data-nr-component'), 'error', null, String(errorEvent.message || 'error'));
+    }
   }, true);
 
   // ---- 3. CTA → redirect timing (epoch-bridged across the navigation) -------
-  document.addEventListener('click', function (ev) {
-    var a = ev.target.closest && ev.target.closest('[data-nr-cta]');
-    if (!a) return;
-    var cta = a.getAttribute('data-nr-cta');
-    try { sessionStorage.setItem('nr_cta', JSON.stringify({ cta: cta, t: Date.now(), from: location.pathname })); } catch (_) {}
-    nr.addPageAction('CtaClick', { cta: cta, fromPath: location.pathname });
-    if (nr.interaction) { try { nr.interaction().setName('cta:' + cta).save(); } catch (_) {} }
+  document.addEventListener('click', function (clickEvent) {
+    var ctaElement = clickEvent.target.closest && clickEvent.target.closest('[data-nr-cta]');
+    if (!ctaElement) return;
+    var cta = ctaElement.getAttribute('data-nr-cta');
+    try { sessionStorage.setItem('nr_cta', JSON.stringify({ cta: cta, t: Date.now(), from: location.pathname })); } catch (storageError) {}
+    newrelicAgent.addPageAction('CtaClick', { cta: cta, fromPath: location.pathname });
+    if (newrelicAgent.interaction) { try { newrelicAgent.interaction().setName('cta:' + cta).save(); } catch (interactionError) {} }
   }, true);
 
   // ---- 4. On load: missing-component check + destination-side CtaRedirect ----
   window.addEventListener('load', function () {
     // 4a. CtaRedirect (computed on the page we landed on).
-    var raw; try { raw = sessionStorage.getItem('nr_cta'); } catch (_) { raw = null; }
-    if (raw) {
-      try { sessionStorage.removeItem('nr_cta'); } catch (_) {}
-      var c; try { c = JSON.parse(raw); } catch (_) { c = null; }
-      var age = c && c.t ? Date.now() - c.t : Infinity;
-      if (c && age >= 0 && age <= 60000) {
-        var nav = performance.getEntriesByType('navigation')[0];
-        var redirectMs = Math.round(performance.timeOrigin + (nav ? nav.domContentLoadedEventEnd : 0) - c.t);
-        if (redirectMs > 0) nr.addPageAction('CtaRedirect', { cta: c.cta, redirectMs: redirectMs, fromPath: c.from, toPath: location.pathname });
+    var storedClick; try { storedClick = sessionStorage.getItem('nr_cta'); } catch (storageError) { storedClick = null; }
+    if (storedClick) {
+      try { sessionStorage.removeItem('nr_cta'); } catch (storageError) {}
+      var clickRecord; try { clickRecord = JSON.parse(storedClick); } catch (parseError) { clickRecord = null; }
+      var clickAgeMs = clickRecord && clickRecord.t ? Date.now() - clickRecord.t : Infinity;
+      if (clickRecord && clickAgeMs >= 0 && clickAgeMs <= 60000) {
+        var navigationTiming = performance.getEntriesByType('navigation')[0];
+        var redirectMs = Math.round(performance.timeOrigin + (navigationTiming ? navigationTiming.domContentLoadedEventEnd : 0) - clickRecord.t);
+        if (redirectMs > 0) {
+          newrelicAgent.addPageAction('CtaRedirect', { cta: clickRecord.cta, redirectMs: redirectMs, fromPath: clickRecord.from, toPath: location.pathname });
+        }
       }
     }
     // 4b. After a grace window, any expected component with no event = missing.
-    var expected = attr('data-nr-expected', '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var expectedComponents = bodyAttr('data-nr-expected', '').split(',').map(function (rawName) { return rawName.trim(); }).filter(Boolean);
     setTimeout(function () {
-      expected.forEach(function (name) { if (!seen[name]) report(name, 'missing', null, 'no render event'); });
+      expectedComponents.forEach(function (component) {
+        if (!statusByComponent[component]) report(component, 'missing', null, 'no render event');
+      });
     }, 4000);
   });
 })();

@@ -15,15 +15,15 @@ type NR = {
   setCustomAttribute: (k: string, v: unknown) => void
   interaction?: () => { setName: (n: string) => { save: () => void } }
 }
-const nr = (): NR | undefined => (typeof window !== 'undefined' ? (window as any).newrelic : undefined)
-const now = () => (typeof performance !== 'undefined' ? performance.now() : 0)
+const getNewrelicAgent = (): NR | undefined => (typeof window !== 'undefined' ? (window as any).newrelic : undefined)
+const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : 0)
 
 /** Set global dimensions once near the top of the tree (re-tag on route change). */
-export function useNrDimensions(d: Record<string, string>) {
+export function useNrDimensions(dimensions: Record<string, string>) {
   React.useEffect(() => {
-    const n = nr(); if (!n) return
-    Object.entries(d).forEach(([k, v]) => n.setCustomAttribute(k, v))
-  }, [d.fundSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+    const agent = getNewrelicAgent(); if (!agent) return
+    Object.entries(dimensions).forEach(([dimensionName, dimensionValue]) => agent.setCustomAttribute(dimensionName, dimensionValue))
+  }, [dimensions.fundSlug]) // eslint-disable-line react-hooks/exhaustive-deps
 }
 
 /** Report render success + latency; catch render errors via the boundary. */
@@ -31,14 +31,14 @@ export class InstrumentedComponent extends React.Component<
   { name: string; children: React.ReactNode },
   { failed: boolean }
 > {
-  start = now()
+  renderStartMs = nowMs()
   state = { failed: false }
   componentDidMount() {
-    nr()?.addPageAction('ComponentRender', { component: this.props.name, status: 'rendered', renderMs: Math.round(now() - this.start), errorMessage: null })
+    getNewrelicAgent()?.addPageAction('ComponentRender', { component: this.props.name, status: 'rendered', renderMs: Math.round(nowMs() - this.renderStartMs), errorMessage: null })
   }
   static getDerivedStateFromError() { return { failed: true } }
   componentDidCatch(error: Error) {
-    nr()?.addPageAction('ComponentRender', { component: this.props.name, status: 'error', renderMs: null, errorMessage: error.message })
+    getNewrelicAgent()?.addPageAction('ComponentRender', { component: this.props.name, status: 'error', renderMs: null, errorMessage: error.message })
   }
   render() {
     return this.state.failed ? <div data-nr-failed={this.props.name} /> : this.props.children
@@ -47,25 +47,25 @@ export class InstrumentedComponent extends React.Component<
 
 /** Data-driven components: call markReady() the moment data is applied to the DOM. */
 export function useComponentTiming(name: string) {
-  const start = React.useRef(now())
+  const renderStartMs = React.useRef(nowMs())
   return React.useCallback((status: 'rendered' | 'error' = 'rendered', error?: string) => {
-    nr()?.addPageAction('ComponentRender', { component: name, status, renderMs: status === 'rendered' ? Math.round(now() - start.current) : null, errorMessage: error ?? null })
+    getNewrelicAgent()?.addPageAction('ComponentRender', { component: name, status, renderMs: status === 'rendered' ? Math.round(nowMs() - renderStartMs.current) : null, errorMessage: error ?? null })
   }, [name])
 }
 
 /** CTA anchor that stamps the click for cross-page redirect timing. */
 export function InstrumentedCta(props: React.AnchorHTMLAttributes<HTMLAnchorElement> & { cta: string }) {
-  const { cta, onClick, ...rest } = props
+  const { cta, onClick, ...anchorProps } = props
   return (
     <a
-      {...rest}
+      {...anchorProps}
       data-nr-cta={cta}
-      onClick={(e) => {
-        const n = nr()
+      onClick={(clickEvent) => {
+        const agent = getNewrelicAgent()
         try { sessionStorage.setItem('nr_cta', JSON.stringify({ cta, t: Date.now(), from: location.pathname })) } catch {}
-        n?.addPageAction('CtaClick', { cta, fromPath: location.pathname })
-        n?.interaction?.().setName(`cta:${cta}`).save()
-        onClick?.(e)
+        agent?.addPageAction('CtaClick', { cta, fromPath: location.pathname })
+        agent?.interaction?.().setName(`cta:${cta}`).save()
+        onClick?.(clickEvent)
       }}
     />
   )

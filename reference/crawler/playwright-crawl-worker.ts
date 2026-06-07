@@ -11,16 +11,18 @@
  * Deps: playwright (or @sparticuz/chromium + playwright-core on Lambda).
  *
  * Input: { slugs: string[] }   (slugs end in "-growth")
- * Env:   NR_ACCOUNT_ID, NR_INSERT_KEY, INVESTMENTS_BASE_URL, PAGE_TYPE, CONCURRENCY
+ * Env:   NR_ACCOUNT_ID, NR_INSERT_KEY, NR_INSIGHTS_BASE_URL, INVESTMENTS_BASE_URL, PAGE_TYPE, CONCURRENCY
  */
 import { chromium, type Browser, type BrowserContext } from 'playwright'
 
 // Base for the monitored URL pattern: `${INVESTMENTS_BASE_URL}${slug}?next=true`.
-const INVESTMENTS_BASE_URL = process.env.INVESTMENTS_BASE_URL ?? 'https://app.bajajfinserv.in/investments/'
+const INVESTMENTS_BASE_URL = process.env.INVESTMENTS_BASE_URL ?? 'https://www.bajajfinserv.in/investments/'
 const PAGE_TYPE = process.env.PAGE_TYPE ?? 'mf-detail'
 const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4)
 const PAGE_TIMEOUT_MS = 30_000
-const NR_EVENT_API = `https://insights-collector.newrelic.com/v1/accounts/${process.env.NR_ACCOUNT_ID}/events`
+// New Relic Event API host (US default; use insights-collector.eu01.nr-data.net for EU).
+const NR_INSIGHTS_BASE_URL = process.env.NR_INSIGHTS_BASE_URL ?? 'https://insights-collector.newrelic.com'
+const NR_EVENT_API = `${NR_INSIGHTS_BASE_URL}/v1/accounts/${process.env.NR_ACCOUNT_ID}/events`
 
 // The components we expect on every fund page (must match data-nr-component=…).
 const EXPECTED_COMPONENTS = [
@@ -36,38 +38,40 @@ interface CrawlEvent {
 }
 
 export const handler = async (input: { slugs: string[] }): Promise<{ crawled: number; events: number }> => {
-  const slugs = input.slugs ?? []
+  const fundSlugs = input.slugs ?? []
   const browser = await chromium.launch({ args: ['--no-sandbox'] })
   const collectedEvents: CrawlEvent[] = []
 
   // Concurrency pool: N workers share a cursor over the slug list.
   let nextSlugIndex = 0
   const crawlWorker = async () => {
-    while (nextSlugIndex < slugs.length) {
-      const slug = slugs[nextSlugIndex++]
-      collectedEvents.push(...(await crawlOneWithTimeout(browser, slug)))
+    while (nextSlugIndex < fundSlugs.length) {
+      const fundSlug = fundSlugs[nextSlugIndex++]
+      collectedEvents.push(...(await crawlOneWithTimeout(browser, fundSlug)))
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, slugs.length) }, crawlWorker))
+  const workerCount = Math.min(CONCURRENCY, fundSlugs.length)
+  await Promise.all(Array.from({ length: workerCount }, crawlWorker))
 
   await browser.close()
   await pushEventsToNewRelic(collectedEvents)
-  console.log(`Crawled ${slugs.length} slugs -> ${collectedEvents.length} events`)
-  return { crawled: slugs.length, events: collectedEvents.length }
+  console.log(`Crawled ${fundSlugs.length} slugs -> ${collectedEvents.length} events`)
+  return { crawled: fundSlugs.length, events: collectedEvents.length }
 }
 
 /** Crawl one page, but never let a single stuck page stall the whole chunk. */
 async function crawlOneWithTimeout(browser: Browser, slug: string): Promise<CrawlEvent[]> {
+  const overallTimeoutMs = PAGE_TIMEOUT_MS + 5_000
   const timeoutGuard = new Promise<CrawlEvent[]>((resolve) =>
     setTimeout(
       () => resolve([{ eventType: 'CrawlPageMetric', pageType: PAGE_TYPE, fundSlug: slug, status: 'timeout' }]),
-      PAGE_TIMEOUT_MS + 5_000,
+      overallTimeoutMs,
     ),
   )
-  const crawl = crawlOne(browser, slug).catch((error) => [
-    { eventType: 'CrawlPageMetric', pageType: PAGE_TYPE, fundSlug: slug, status: 'crawl_error', errorMessage: String(error) },
+  const crawlAttempt = crawlOne(browser, slug).catch((crawlError) => [
+    { eventType: 'CrawlPageMetric', pageType: PAGE_TYPE, fundSlug: slug, status: 'crawl_error', errorMessage: String(crawlError) },
   ])
-  return Promise.race([crawl, timeoutGuard])
+  return Promise.race([crawlAttempt, timeoutGuard])
 }
 
 async function crawlOne(browser: Browser, slug: string): Promise<CrawlEvent[]> {
@@ -83,34 +87,37 @@ async function crawlOne(browser: Browser, slug: string): Promise<CrawlEvent[]> {
 
   // Capture API timing from the `response` event (timing is ready by then —
   // no awaiting inside the handler, so no race with page settle).
-  const apiTimings: Record<string, { durationMs: number; status: number }> = {}
+  const apiTimingsByEndpoint: Record<string, { durationMs: number; status: number }> = {}
   page.on('response', (response) => {
     const request = response.request()
-    if (request.resourceType() !== 'xhr' && request.resourceType() !== 'fetch') return
-    const timing = request.timing()
-    apiTimings[normalizeEndpoint(request.url())] = {
-      durationMs: Math.round(timing.responseEnd - timing.requestStart),
+    const resourceType = request.resourceType()
+    if (resourceType !== 'xhr' && resourceType !== 'fetch') return
+    const requestTiming = request.timing()
+    apiTimingsByEndpoint[normalizeEndpoint(request.url())] = {
+      durationMs: Math.round(requestTiming.responseEnd - requestTiming.requestStart),
       status: response.status(),
     }
   })
 
   // 1. Load the page (the URL follows the /investments/{slug}-growth pattern).
   const loadStartedAt = Date.now()
-  const response = await page.goto(`${INVESTMENTS_BASE_URL}${slug}?next=true`, { waitUntil: 'networkidle', timeout: PAGE_TIMEOUT_MS })
+  const pageResponse = await page.goto(`${INVESTMENTS_BASE_URL}${slug}?next=true`, { waitUntil: 'networkidle', timeout: PAGE_TIMEOUT_MS })
   const loadMs = Date.now() - loadStartedAt
 
   // 2. Read CWV + per-component element-timing from inside the page, once.
   const inPageMetrics = await page.evaluate(() => {
-    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+    const navigationTiming = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
     const largestContentfulPaint = performance.getEntriesByType('largest-contentful-paint').at(-1) as any
-    const componentRenderMs: Record<string, number> = {}
-    for (const entry of performance.getEntriesByType('element') as any[]) {
-      if (entry.identifier) componentRenderMs[entry.identifier] = Math.round(entry.renderTime || entry.loadTime)
+    const renderMsByComponent: Record<string, number> = {}
+    for (const elementTiming of performance.getEntriesByType('element') as any[]) {
+      if (elementTiming.identifier) {
+        renderMsByComponent[elementTiming.identifier] = Math.round(elementTiming.renderTime || elementTiming.loadTime)
+      }
     }
     return {
-      domContentLoaded: navigation ? Math.round(navigation.domContentLoadedEventEnd) : null,
+      domContentLoaded: navigationTiming ? Math.round(navigationTiming.domContentLoadedEventEnd) : null,
       lcp: largestContentfulPaint ? Math.round(largestContentfulPaint.renderTime) : null,
-      componentRenderMs,
+      componentRenderMs: renderMsByComponent,
     }
   })
 
@@ -130,8 +137,8 @@ async function crawlOne(browser: Browser, slug: string): Promise<CrawlEvent[]> {
   events.push({
     eventType: 'CrawlPageMetric',
     ...baseAttributes,
-    status: response?.ok() ? 'ok' : 'http_error',
-    httpStatus: response?.status() ?? 0,
+    status: pageResponse?.ok() ? 'ok' : 'http_error',
+    httpStatus: pageResponse?.status() ?? 0,
     loadMs,
     domContentLoaded: inPageMetrics.domContentLoaded,
     lcp: inPageMetrics.lcp,
@@ -139,8 +146,8 @@ async function crawlOne(browser: Browser, slug: string): Promise<CrawlEvent[]> {
   })
 
   // 5. One metric per API endpoint that was called.
-  for (const [endpoint, timing] of Object.entries(apiTimings)) {
-    events.push({ eventType: 'CrawlApiMetric', ...baseAttributes, endpoint, durationMs: timing.durationMs, httpStatus: timing.status })
+  for (const [endpoint, apiTiming] of Object.entries(apiTimingsByEndpoint)) {
+    events.push({ eventType: 'CrawlApiMetric', ...baseAttributes, endpoint, durationMs: apiTiming.durationMs, httpStatus: apiTiming.status })
   }
 
   // 6. CTA → redirect timing (after measuring load, so it doesn't pollute it).
@@ -169,15 +176,64 @@ function normalizeEndpoint(url: string): string {
   }
 }
 
-/** Batch-push events to the New Relic Event API (<=1000 per request). */
+const MAX_EVENTS_PER_REQUEST = 1000 // New Relic Event API per-request cap
+// Parse a numeric env knob, falling back for unset/empty/non-numeric/below-min
+// values — so a typo can't, e.g., zero out the retry loop and silently drop a batch.
+const intEnv = (name: string, fallback: number, min: number): number => {
+  const parsed = Number(process.env[name])
+  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback
+}
+const PUSH_MAX_ATTEMPTS = intEnv('NR_PUSH_MAX_ATTEMPTS', 4, 1) // always >= 1 attempt
+const PUSH_BACKOFF_MS = intEnv('NR_PUSH_BACKOFF_MS', 250, 0)
+const PUSH_TIMEOUT_MS = intEnv('NR_PUSH_TIMEOUT_MS', 15_000, 1)
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Batch-push events to the New Relic Event API (<=1000 per request). Each batch
+ * is retried with backoff on a transient failure (network error, 429, or 5xx);
+ * a 4xx (bad key/payload) fails fast. If a batch can't be delivered, we THROW so
+ * the chunk is marked failed and the orchestrator (Step Functions / SQS) retries
+ * it — telemetry is never silently dropped, keeping coverage honest.
+ *
+ * Note: for very large chunks (Fargate, hundreds of pages) prefer flushing per
+ * page from the worker pool so memory stays bounded and a crash loses less.
+ */
 async function pushEventsToNewRelic(events: CrawlEvent[]): Promise<void> {
-  for (let offset = 0; offset < events.length; offset += 1000) {
-    const batch = events.slice(offset, offset + 1000)
-    const response = await fetch(NR_EVENT_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Api-Key': process.env.NR_INSERT_KEY! },
-      body: JSON.stringify(batch),
-    })
-    if (!response.ok) console.error('NR Event API error', response.status, await response.text())
+  for (let batchStartIndex = 0; batchStartIndex < events.length; batchStartIndex += MAX_EVENTS_PER_REQUEST) {
+    const batch = events.slice(batchStartIndex, batchStartIndex + MAX_EVENTS_PER_REQUEST)
+    await pushBatchWithRetry(batch, `events ${batchStartIndex}–${batchStartIndex + batch.length}`)
+  }
+}
+
+/** Deliver one batch, retrying transient failures with exponential backoff. */
+async function pushBatchWithRetry(batch: CrawlEvent[], label: string): Promise<void> {
+  for (let attempt = 1; attempt <= PUSH_MAX_ATTEMPTS; attempt++) {
+    let isTransient = false
+    // Abort a stalled connection so a hung push can't block the chunk forever.
+    const abortController = new AbortController()
+    const abortTimer = setTimeout(() => abortController.abort(), PUSH_TIMEOUT_MS)
+    try {
+      const response = await fetch(NR_EVENT_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Api-Key': process.env.NR_INSERT_KEY! },
+        body: JSON.stringify(batch),
+        signal: abortController.signal,
+      })
+      if (response.ok) return
+      const responseBody = await response.text()
+      // 4xx (bad insert key / payload) won't succeed on retry — fail loudly now.
+      if (response.status !== 429 && response.status < 500) {
+        throw new Error(`NR Event API rejected ${label}: HTTP ${response.status} ${responseBody}`)
+      }
+      isTransient = true // 429 / 5xx — retry
+      if (attempt >= PUSH_MAX_ATTEMPTS) throw new Error(`NR Event API ${label}: HTTP ${response.status} after ${attempt} attempts`)
+    } catch (error) {
+      // Transient: a 429/5xx (above), our timeout (AbortError), or a network failure (TypeError).
+      const transient = isTransient || error instanceof TypeError || (error instanceof Error && error.name === 'AbortError')
+      if (!transient || attempt >= PUSH_MAX_ATTEMPTS) throw error
+    } finally {
+      clearTimeout(abortTimer)
+    }
+    await sleep(PUSH_BACKOFF_MS * 2 ** (attempt - 1)) // 250ms, 500ms, 1s, …
   }
 }

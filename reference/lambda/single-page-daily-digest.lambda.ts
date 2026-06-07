@@ -12,7 +12,7 @@ import {
   sendEmail,
   num,
   type ReportSection,
-} from './shared-nerdgraph-email-utils'
+} from './report-shared'
 
 const MONITORED_PAGE_PATH = process.env.MONITORED_PAGE_PATH ?? '/investments/nippon-india-taiwan-equity-fund-g-growth'
 const SYNTHETIC_MONITOR_NAME = process.env.SYNTHETIC_MONITOR_NAME ?? 'investments-nippon-taiwan-growth-monitor'
@@ -25,8 +25,8 @@ export const handler = async (): Promise<void> => {
   const secrets = await getSecrets()
   const apiKey = secrets.NR_API_KEY
 
-  // Pull the headline numbers in parallel.
-  const [uptime, serverMetrics, coreWebVitals, syntheticFailures] = await Promise.all([
+  // Pull the headline numbers in parallel. Each query returns an array of rows.
+  const [uptimeRows, serverMetricRows, coreWebVitalRows, syntheticFailureRows] = await Promise.all([
     safeNrql(
       `SELECT percentage(count(*), WHERE result='SUCCESS') AS uptime
         FROM SyntheticCheck WHERE monitorName = '${SYNTHETIC_MONITOR_NAME}' ${REPORTING_PERIOD}`,
@@ -50,29 +50,30 @@ export const handler = async (): Promise<void> => {
     ),
   ])
 
-  const uptimeRow = uptime[0]
-  const server = serverMetrics[0]
-  const vitals = coreWebVitals[0]
-  const failuresRow = syntheticFailures[0]
-  const uptimePct = Number(uptimeRow?.uptime ?? 0)
+  // Each query is a single-row aggregate, so we only care about the first row.
+  const uptimeMetrics = uptimeRows[0]
+  const serverMetrics = serverMetricRows[0]
+  const coreWebVitals = coreWebVitalRows[0]
+  const syntheticFailureMetrics = syntheticFailureRows[0]
+  const uptimePercentage = Number(uptimeMetrics?.uptime ?? 0)
 
   const sections: ReportSection[] = [
     {
       heading: 'Availability',
       rows: [
-        { label: 'Uptime (%)', value: num(uptimeRow, 'uptime', 3), bad: uptimePct < 99.9 },
-        { label: 'Failed synthetic checks', value: num(failuresRow, 'failures'), bad: Number(failuresRow?.failures) > 0 },
-        { label: 'Requests served', value: num(server, 'throughput') },
+        { label: 'Uptime (%)', value: num(uptimeMetrics, 'uptime', 3), bad: uptimePercentage < 99.9 },
+        { label: 'Failed synthetic checks', value: num(syntheticFailureMetrics, 'failures'), bad: Number(syntheticFailureMetrics?.failures) > 0 },
+        { label: 'Requests served', value: num(serverMetrics, 'throughput') },
       ],
     },
     {
       heading: 'Performance',
       rows: [
-        { label: 'p95 latency (ms)', value: num(server, 'p95'), bad: Number(server?.p95) > 2000 },
-        { label: 'Error rate (%)', value: num(server, 'errorPct', 2), bad: Number(server?.errorPct) > 1 },
-        { label: 'Apdex', value: num(server, 'apdex', 2), bad: Number(server?.apdex) < 0.9 },
-        { label: 'LCP p75 (s)', value: num(vitals, 'lcp', 2), bad: Number(vitals?.lcp) > 2.5 },
-        { label: 'INP p75 (ms)', value: num(vitals, 'inp'), bad: Number(vitals?.inp) > 200 },
+        { label: 'p95 latency (ms)', value: num(serverMetrics, 'p95'), bad: Number(serverMetrics?.p95) > 2000 },
+        { label: 'Error rate (%)', value: num(serverMetrics, 'errorPct', 2), bad: Number(serverMetrics?.errorPct) > 1 },
+        { label: 'Apdex', value: num(serverMetrics, 'apdex', 2), bad: Number(serverMetrics?.apdex) < 0.9 },
+        { label: 'LCP p75 (s)', value: num(coreWebVitals, 'lcp', 2), bad: Number(coreWebVitals?.lcp) > 2.5 },
+        { label: 'INP p75 (ms)', value: num(coreWebVitals, 'inp'), bad: Number(coreWebVitals?.inp) > 200 },
       ],
     },
   ]
@@ -87,7 +88,7 @@ export const handler = async (): Promise<void> => {
   await sendEmail({
     from: secrets.SES_FROM,
     to: secrets.DIGEST_RECIPIENTS.split(','),
-    subject: `Digest: ${MONITORED_PAGE_PATH} — uptime ${uptimePct.toFixed(2)}%`,
+    subject: `Digest: ${MONITORED_PAGE_PATH} — uptime ${uptimePercentage.toFixed(2)}%`,
     html,
   })
 }

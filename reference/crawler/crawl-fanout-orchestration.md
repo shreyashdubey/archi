@@ -1,7 +1,8 @@
 # Crawler orchestration — fanning 6,000 pages across parallel workers
 
-The `playwright-crawl-worker.ts` worker crawls a **chunk** of slugs. Something must discover all 6,000 slugs,
-split them, run the workers in parallel, then trigger the report. Three options.
+The `playwright-crawl-worker.ts` worker crawls a **chunk** of slugs. Something must discover all 6,000 slugs
+(from the site's **sitemap**, `SITEMAP_URL`), split them, run the workers in parallel, then trigger the
+report. Three options.
 
 ---
 
@@ -9,7 +10,7 @@ split them, run the workers in parallel, then trigger the report. Three options.
 
 ```mermaid
 flowchart TB
-    CRON["EventBridge cron (02:00)"] --> DISCO["Lambda: discover<br/>GET slug API -> chunk into [[..50..],[..50..]]"]
+    CRON["EventBridge cron (02:00)"] --> DISCO["Lambda: discover<br/>GET sitemap -> parse /investments/{slug} -> chunk into [[..50..],[..50..]]"]
     DISCO --> MAP{{"Step Functions Map<br/>maxConcurrency: 20"}}
     MAP --> C1["crawler Lambda (chunk)"]
     MAP --> C2["crawler Lambda (chunk)"]
@@ -18,7 +19,10 @@ flowchart TB
     DONE --> REPORT["Lambda: fleet report + charts + email"]
 ```
 
-- **discover** Lambda: fetch slugs → return `[{slugs:[...50]}, …]` (≈120 items for 6,000).
+- **discover** Lambda: fetch the **sitemap** (`SITEMAP_URL`, ~6,000 URLs), extract the slug from each
+  `/investments/{slug}-growth` entry (the monitored template — skip any non-growth URL), dedupe →
+  return `{ chunks: [{slugs:[...50]}, …] }` (≈120 chunks for 6,000), matching the Map's
+  `ItemsPath: "$.chunks"` below.
 - **Map state**: `MaxConcurrency: 20` runs 20 crawler Lambdas at a time; the rest queue. Each crawls
   ~50 pages in well under the 15-min Lambda limit.
 - On completion the state machine invokes the **report** Lambda.

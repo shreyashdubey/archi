@@ -1,6 +1,6 @@
 # Why Terraform? (and what `main.tf` actually does)
 
-Short answer: our monitoring isn't one thing in one place — it's **~15 resources split across
+Short answer: our monitoring isn't one thing in one place — it's **~22 resources split across
 two different clouds (New Relic + AWS) that must reference each other by name and ARN**. Terraform
 is the one tool that can create *both* in a single, reviewable, repeatable graph and wire them
 together automatically. Doing it by hand in two web consoles is slow, error-prone, and impossible
@@ -13,23 +13,25 @@ to reproduce.
 The daily-report architecture is not just "a Lambda". It's a chain that crosses providers:
 
 ```
-NEW RELIC                                   AWS
-─────────                                   ───
-Synthetics monitor  ─┐
-NRQL alert conditions├─► Workflow ─► Webhook ──► Lambda Function URL ─► Lambda (incident email)
-Alert policy        ─┘                               ▲                        │
-                                                     │                        ├─► SES
-                          EventBridge cron ──────────┼──► Lambda (digest)     │
-                                                     │                        └─► SQS DLQ
-                          Secrets Manager (NR key) ──┘   IAM roles/policies
+NEW RELIC                                          AWS
+─────────                                          ───
+Synthetics: SIMPLE (1 page)                       ┌─► Lambda (incident email) ─┐
+          + SCRIPT_API (rotating fleet sweep) ─┐  │                            │
+NRQL alert conditions                          ├─► Workflow ─► Webhook ─► URL ──┘   ├─► SES
+Alert policy                                  ─┘                                    │
+                                                                                    │
+EventBridge cron (single-page, 09:00) ──────────► Lambda (single-page digest) ──────┤
+EventBridge cron (fleet, 09:30) ─────────────────► Lambda (fleet digest) ───────────┤
+                                                                                    └─► SQS DLQ
+Secrets Manager (NR key) ──► all Lambdas           IAM roles/policies (least-privilege)
 ```
 
 `main.tf` declares all of it:
 
 | Provider | Resources in `main.tf` |
 |----------|------------------------|
-| **New Relic** | `newrelic_synthetics_monitor`, `newrelic_alert_policy`, 3× `newrelic_nrql_alert_condition` (downtime + slow SSR + slow LCP, all pinned to `var.url_pattern`), `newrelic_notification_destination`/`_channel`, `newrelic_workflow` |
-| **AWS** | `aws_secretsmanager_secret(+version)`, `aws_sqs_queue` (DLQ), `aws_iam_role`/`_policy` (least-privilege), `aws_lambda_function` ×2, `aws_lambda_function_url`, `aws_scheduler_schedule` (cron) |
+| **New Relic** | `newrelic_synthetics_monitor` (SIMPLE, single page) + `newrelic_synthetics_script_monitor` (SCRIPT_API, rotating fleet sweep), `newrelic_alert_policy`, 3× `newrelic_nrql_alert_condition` (downtime + slow SSR + slow LCP, all pinned to `var.url_pattern`), `newrelic_notification_destination`/`_channel`, `newrelic_workflow` |
+| **AWS** | `aws_secretsmanager_secret(+version)`, `aws_sqs_queue` (DLQ), 2× `aws_iam_role` + 2× `aws_iam_role_policy` (lambda + scheduler, least-privilege), `aws_lambda_function` ×3 (incident, single-page digest, **fleet digest**), `aws_lambda_function_url`, 2× `aws_scheduler_schedule` (single-page + fleet crons) |
 
 ---
 
@@ -63,7 +65,7 @@ then feeds its real URL into New Relic — no copy-pasting an ARN between two br
 
 | Without IaC ("click-ops") | With Terraform |
 |---------------------------|----------------|
-| Set up ~15 resources by hand in 2 consoles | `terraform apply` builds them all |
+| Set up ~22 resources by hand in 2 consoles | `terraform apply` builds them all |
 | "Which prod alert thresholds are live?" → unknown | The `.tf` file *is* the source of truth, in git |
 | Recreate for `uat` and `prod` → repeat by hand, drift | Re-apply with different `var` values |
 | Change a threshold → hope you found every place | Edit one value, `plan` shows the exact diff |

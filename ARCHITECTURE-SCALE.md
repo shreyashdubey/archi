@@ -37,12 +37,12 @@ flowchart LR
     end
     subgraph NR["New Relic"]
       RUM[("RUM events<br/>PageView · PageViewTiming<br/>AjaxRequest · BrowserInteraction<br/>+ custom PageActions:<br/>ComponentRender · CtaRedirect")]
-      SYN["Synthetics: 1 rotating monitor<br/>pulls slug API → samples N slugs/run"]
+      SYN["Synthetics: 1 rotating monitor<br/>pulls sitemap → samples N slugs/run"]
       SLO["Service Levels (SLO)<br/>per template"]
     end
     subgraph AWS["AWS"]
       EB["EventBridge cron (daily)"]
-      L["Lambda: fleet-digest"]
+      L["Lambda: all-pages-digest"]
       SM["Secrets Manager"]
       SES["SES"]
     end
@@ -128,10 +128,11 @@ group into one row per endpoint in the report.
    template metrics automatically. Aggregate by `pageType`; drill by `fundSlug`. This covers
    everything with real traffic, for free, all day.
 2. **One rotating Synthetics monitor** covers the **long tail** (low/zero-traffic pages) and gives
-   pre-user detection. A scripted monitor pulls the slug API, picks **N slugs per run** (critical
-   funds always + a rotating random sample), loads each, and asserts key components exist. Over a day
-   of 5-min runs it sweeps thousands of pages without 6000 monitors. It `logs` how many were checked
-   so coverage is never silently capped. See `reference/synthetics/rotating-sample-monitor.js`.
+   pre-user detection. A scripted monitor pulls the **sitemap** (`/api/amc-pdp/sitemap-details`),
+   extracts the slugs, picks **N slugs per run** (critical funds always + a rotating sample), loads
+   each, and asserts key components exist. Over a day of 5-min runs it sweeps thousands of pages
+   without 6000 monitors. It `logs` how many were checked so coverage is never silently capped. See
+   `reference/synthetics/rotating-sample-monitor.js`.
 3. **Service Levels (SLO)** per template (availability %, latency, render-success) give a stable
    headline number and error-budget burn for the digest.
 4. **Deploy markers** via `appVersion` let the report attribute a regression to a release.
@@ -155,7 +156,7 @@ Per-page rows are **aggregated + top-N worst offenders** — never 6000 rows.
 7. **Synthetic coverage** — pages checked, failures, which slugs failed.
 8. **Day-over-day deltas / regressions** — flag metrics worse than yesterday, tagged by `appVersion`.
 
-Handler: `reference/lambda/fleet-digest-rum.lambda.ts`. NRQL: `reference/nrql/fleet-rum-digest.nrql`.
+Handler: `reference/lambda/all-pages-daily-digest-realuser.lambda.ts`. NRQL: `reference/nrql/all-pages-realuser-digest.nrql`.
 
 ---
 
@@ -167,7 +168,7 @@ Handler: `reference/lambda/fleet-digest-rum.lambda.ts`. NRQL: `reference/nrql/fl
 | Component truth | Explicit `ComponentRender` events (success/error/missing), not inferred from CWV. |
 | CTA redirect time | Epoch-bridged click→destination-ready measure (cross-page) + SPA `interaction()`. |
 | API time | Native `AjaxRequest` auto-capture, URLs normalized to group dynamic slugs. |
-| Long-tail / zero-traffic pages | One rotating synthetic sweep over the slug API. |
+| Long-tail / zero-traffic pages | One rotating synthetic sweep over the sitemap's slugs. |
 | Email at scale | Aggregate + top-N; faceted NRQL; never enumerate all pages. |
 | Regressions | `appVersion` attribute + day-over-day deltas. |
 | Cardinality cost | Slug is an **attribute**, not a metric/monitor name → cheap to store, cheap to facet. |
@@ -182,7 +183,8 @@ Handler: `reference/lambda/fleet-digest-rum.lambda.ts`. NRQL: `reference/nrql/fl
   version for cleaner timing.
 - You can add small markup hooks: `data-nr-component`, `elementtiming`, `data-nr-cta` to the template
   components (one-time template change → applies to all 6000 pages automatically).
-- The slug-list API is reachable from a New Relic Synthetics location (for the rotating monitor).
+- The sitemap (`/api/amc-pdp/sitemap-details`) is reachable from a New Relic Synthetics location and
+  from the crawl fan-out's discover step (it's the source of the slug list).
 - `next=true` and other query params don't change the template identity — we key on path/pageType.
 
 [Element Timing API]: https://developer.mozilla.org/en-US/docs/Web/API/PerformanceElementTiming

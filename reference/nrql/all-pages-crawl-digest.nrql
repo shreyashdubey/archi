@@ -1,7 +1,7 @@
 -- ============================================================================
--- fleet-crawl-digest.nrql
+-- all-pages-crawl-digest.nrql
 -- JOB: queries that build the DAILY CRAWL DIGEST (complete, all-pages coverage).
---      Run by reference/lambda/fleet-digest-crawl-graphs.lambda.ts
+--      Run by reference/lambda/all-pages-daily-digest-crawl-charts.lambda.ts
 --
 -- MONITORED SURFACE: the fund-detail template, served at the URL pattern
 --   /investments/{slug}-growth
@@ -42,7 +42,12 @@ FACET component
 SINCE 1 day ago LIMIT 50;
 
 -- 3) FULL PER-PAGE TABLE — ONE ROW PER SLUG → CSV ATTACHMENT -----------------
--- LIMIT MAX returns every /investments/*-growth page, not just the top N.
+-- LIMIT MAX returns up to NerdGraph's FACET cap (~10k facets) — enough for the
+-- ~6,000 pages today. If the fleet ever outgrows the cap, NRQL silently keeps
+-- only the top facets: compare this row count to the "Coverage check" query's
+-- uniqueCount(fundSlug) above to detect truncation (the report does this), and
+-- export the complete per-page set from the crawler's own S3 output rather than
+-- re-querying NRDB by facet.
 SELECT average(loadMs) AS load_ms, max(lcp) AS lcp_ms, sum(jsErrors) AS js_errors,
        latest(httpStatus) AS http_status
 FROM CrawlPageMetric

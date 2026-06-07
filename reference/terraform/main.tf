@@ -1,7 +1,12 @@
 # =============================================================================
-# IaC: New Relic alerting + AWS reporting pipeline for a single page.
-# Providers: newrelic + aws. This is a reference skeleton — fill in vars,
-# package the Lambda zip, and adjust ARNs/regions for your account.
+# IaC: New Relic alerting + AWS reporting pipeline.
+# Covers BOTH the v1 single-page path (SIMPLE monitor + incident + single-page
+# digest) and the scaled fleet path (rotating SCRIPT_API monitor + all-pages
+# digest) from ARCHITECTURE-SCALE.md. The nightly crawler fan-out itself
+# (Step Functions / Fargate) is a separate module — see
+# reference/crawler/crawl-fanout-orchestration.md.
+# Providers: newrelic + aws. Reference skeleton — fill in vars, package the
+# Lambda zip, and adjust ARNs/regions for your account.
 # =============================================================================
 
 terraform {
@@ -18,12 +23,12 @@ terraform {
 variable "nr_account_id" { type = number }
 variable "nr_api_key"    { type = string, sensitive = true }
 variable "page_name"     { type = string, default = "investments-growth" }
-variable "page_url"      { type = string, default = "https://app.bajajfinserv.in/investments/nippon-india-taiwan-equity-fund-g-growth" }
+variable "page_url"      { type = string, default = "https://bajajfinserv.in/investments/{page-slug}-growth" }
 variable "url_pattern"   { type = string, default = "%/investments/%-growth%" }
 variable "ses_from"      { type = string }
 variable "recipients"    { type = string } # comma-separated
 
-provider "aws" { region = "us-east-1" }
+provider "aws" { region = local.env_file["AWS_REGION"] }
 provider "newrelic" {
   account_id = var.nr_account_id
   api_key    = var.nr_api_key
@@ -40,6 +45,24 @@ resource "newrelic_synthetics_monitor" "page" {
   period           = "EVERY_MINUTE"
   status           = "ENABLED"
   locations_public = ["AWS_US_EAST_1", "AWS_EU_WEST_1", "AWS_AP_SOUTH_1"]
+}
+
+# Scaled coverage: ONE rotating SCRIPT_API monitor sweeps the fleet's long tail
+# (pulls the sitemap, checks a rotating sample each run) instead of 6,000 monitors.
+# Name MUST contain "-rotating" so the fleet digest NRQL
+# (monitorName LIKE 'investments-growth-rotating%') picks up its SyntheticCheck
+# events while excluding the single-page SIMPLE monitor above ("-page-monitor").
+resource "newrelic_synthetics_script_monitor" "rotating" {
+  name                 = "${var.page_name}-rotating"
+  type                 = "SCRIPT_API"
+  locations_public     = ["AWS_US_EAST_1", "AWS_EU_WEST_1", "AWS_AP_SOUTH_1"]
+  period               = "EVERY_5_MINUTES" # rotating-sample-monitor.js RUN_INTERVAL_MINUTES must match (5)
+  status               = "ENABLED"
+  script               = file("${path.module}/../synthetics/rotating-sample-monitor.js")
+  script_language      = "JAVASCRIPT"
+  runtime_type         = "NODE_API"
+  runtime_type_version = "16.10" # set to a currently-supported New Relic synthetics runtime
+  # SITEMAP_URL defaults in-script; override via a newrelic_synthetics_secure_credential if needed.
 }
 
 # -----------------------------------------------------------------------------
@@ -198,12 +221,22 @@ resource "aws_iam_role_policy" "perms" {
 }
 
 locals {
+  # Single source of truth for config: the project env file. Prefer reference/.env,
+  # fall back to the committed reference/.env.example. Parsed into a map so this
+  # IaC reuses the SAME keys the handlers read from process.env (no duplicated literals).
+  env_file_path = fileexists("${path.module}/../.env") ? "${path.module}/../.env" : "${path.module}/../.env.example"
+  env_file = {
+    for line in split("\n", file(local.env_file_path)) :
+    trimspace(split("=", line)[0]) => trimspace(join("=", slice(split("=", line), 1, length(split("=", line)))))
+    if length(trimspace(line)) > 0 && substr(trimspace(line), 0, 1) != "#" && length(split("=", line)) > 1
+  }
+
   env = {
-    SECRET_ARN         = aws_secretsmanager_secret.nr.arn
-    NR_ACCOUNT_ID      = tostring(var.nr_account_id)
+    SECRET_ARN          = aws_secretsmanager_secret.nr.arn
+    NR_ACCOUNT_ID       = tostring(var.nr_account_id)
     # Single-page handlers pin their NRQL to this path; fleet handlers use PAGE_TYPE.
-    MONITORED_PAGE_PATH = "/investments/nippon-india-taiwan-equity-fund-g-growth"
-    PAGE_TYPE           = "mf-detail"
+    MONITORED_PAGE_PATH = local.env_file["MONITORED_PAGE_PATH"]
+    PAGE_TYPE           = local.env_file["PAGE_TYPE"]
   }
 }
 
@@ -234,7 +267,7 @@ resource "aws_lambda_function" "digest" {
   source_code_hash = filebase64sha256("report.zip")
   timeout          = 30
   environment {
-    variables = merge(local.env, { DIGEST_PERIOD = "SINCE 1 day ago" })
+    variables = merge(local.env, { DIGEST_PERIOD = local.env_file["DIGEST_PERIOD"] })
   }
 }
 
@@ -264,10 +297,45 @@ resource "aws_iam_role_policy" "scheduler_invoke" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow", Action = "lambda:InvokeFunction"
-      Resource = aws_lambda_function.digest.arn
+      Effect   = "Allow", Action = "lambda:InvokeFunction"
+      Resource = [aws_lambda_function.digest.arn, aws_lambda_function.fleet_digest.arn]
     }]
   })
+}
+
+# -----------------------------------------------------------------------------
+# AWS: Fleet (all-pages) daily digest — the SCALED report (ARCHITECTURE-SCALE).
+# Crawl-based coverage of every page + RUM, with PNG charts and a per-page CSV.
+# Reads the crawl events the nightly crawler fan-out pushes to New Relic.
+# -----------------------------------------------------------------------------
+resource "aws_lambda_function" "fleet_digest" {
+  function_name    = "${var.page_name}-fleet-digest"
+  role             = aws_iam_role.lambda.arn
+  runtime          = "nodejs20.x"
+  handler          = "all-pages-daily-digest-crawl-charts.lambda.handler"
+  filename         = "report.zip"
+  source_code_hash = filebase64sha256("report.zip")
+  timeout          = 120  # ~9 NRQL queries + render 5 PNG charts + build the CSV
+  memory_size      = 1024 # chart rendering (chartjs-node-canvas) is memory-hungry
+  environment {
+    variables = merge(local.env, {
+      DIGEST_PERIOD = local.env_file["DIGEST_PERIOD"]
+      REPORT_DATE   = local.env_file["REPORT_DATE"]
+    })
+  }
+  dead_letter_config { target_arn = aws_sqs_queue.dlq.arn }
+}
+
+# Runs after the nightly crawl finishes. Cost note: one Fargate-spot crawl + a
+# couple of digest invocations/day → cents; New Relic data ingest dominates.
+resource "aws_scheduler_schedule" "fleet_digest" {
+  name                = "${var.page_name}-fleet-daily-digest"
+  schedule_expression = "cron(30 9 * * ? *)" # 09:30 UTC, after the single-page digest
+  flexible_time_window { mode = "OFF" }
+  target {
+    arn      = aws_lambda_function.fleet_digest.arn
+    role_arn = aws_iam_role.scheduler.arn
+  }
 }
 
 output "incident_webhook_url" {

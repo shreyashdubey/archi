@@ -289,5 +289,5 @@ reporting, model the page as a **New Relic Service Level** (SLI/SLO) and report 
 | `reference/nrql/single-page-alerts-and-report.nrql` | Alert conditions + report NRQL queries |
 | `reference/lambda/incident-alert-email.lambda.ts` | Event-driven enrichment + SES email |
 | `reference/lambda/single-page-daily-digest.lambda.ts` | Cron digest report |
-| `reference/lambda/shared-nerdgraph-email-utils.ts` | Shared NerdGraph client + HTML renderer + SES send |
+| `reference/lambda/report-shared.ts` | Shared NerdGraph client + HTML renderer + SES send |
 | `reference/terraform/main.tf` | IaC: NR alerts/workflow + AWS Lambda/SES/EventBridge |

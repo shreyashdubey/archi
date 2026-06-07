@@ -21,7 +21,7 @@ import {
   sendEmail,
   num,
   type ReportSection,
-} from './shared-nerdgraph-email-utils'
+} from './report-shared'
 
 /** Shape of the New Relic workflow webhook payload (configured in the workflow). */
 interface NewRelicIncident {
@@ -61,8 +61,10 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
   }
 
   // 3. Enrich (best-effort: the email still sends even if a query fails).
+  //    Single-row aggregates come back as one-element arrays; faceted queries
+  //    (top errors, failing locations) come back as one row per facet value.
   const apiKey = secrets.NR_API_KEY
-  const [serverMetrics, coreWebVitals, topErrors, failingLocations] = await Promise.all([
+  const [serverMetricRows, coreWebVitalRows, topErrorRows, failingLocationRows] = await Promise.all([
     safeNrql(
       `SELECT percentile(duration,95) AS p95, percentage(count(*), WHERE error IS true) AS errorPct,
         apdex(duration, t:0.5) AS apdex FROM Transaction WHERE ${SERVER_URL_FILTER} ${INCIDENT_WINDOW}`,
@@ -85,35 +87,35 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
     ),
   ])
 
-  const server = serverMetrics[0]
-  const vitals = coreWebVitals[0]
+  const serverMetrics = serverMetricRows[0]
+  const coreWebVitals = coreWebVitalRows[0]
 
   const sections: ReportSection[] = [
     {
       heading: 'Server (APM)',
       rows: [
-        { label: 'p95 latency (ms)', value: num(server, 'p95'), bad: Number(server?.p95) > 2000 },
-        { label: 'Error rate (%)', value: num(server, 'errorPct', 1), bad: Number(server?.errorPct) > 5 },
-        { label: 'Apdex', value: num(server, 'apdex', 2), bad: Number(server?.apdex) < 0.85 },
+        { label: 'p95 latency (ms)', value: num(serverMetrics, 'p95'), bad: Number(serverMetrics?.p95) > 2000 },
+        { label: 'Error rate (%)', value: num(serverMetrics, 'errorPct', 1), bad: Number(serverMetrics?.errorPct) > 5 },
+        { label: 'Apdex', value: num(serverMetrics, 'apdex', 2), bad: Number(serverMetrics?.apdex) < 0.85 },
       ],
     },
     {
       heading: 'Real users (Core Web Vitals)',
       rows: [
-        { label: 'LCP p75 (s)', value: num(vitals, 'lcp', 2), bad: Number(vitals?.lcp) > 2.5 },
-        { label: 'INP p75 (ms)', value: num(vitals, 'inp'), bad: Number(vitals?.inp) > 200 },
+        { label: 'LCP p75 (s)', value: num(coreWebVitals, 'lcp', 2), bad: Number(coreWebVitals?.lcp) > 2.5 },
+        { label: 'INP p75 (ms)', value: num(coreWebVitals, 'inp'), bad: Number(coreWebVitals?.inp) > 200 },
       ],
     },
     {
       heading: 'Top errors',
-      rows: topErrors.length
-        ? topErrors.map((row) => ({ label: String(row['error.message'] ?? '—'), value: num(row, 'count') }))
+      rows: topErrorRows.length
+        ? topErrorRows.map((errorRow) => ({ label: String(errorRow['error.message'] ?? '—'), value: num(errorRow, 'count') }))
         : [{ label: 'No errors captured', value: '0' }],
     },
     {
       heading: 'Failing synthetic locations',
-      rows: failingLocations.length
-        ? failingLocations.map((row) => ({ label: String(row.locationLabel ?? '—'), value: num(row, 'count'), bad: true }))
+      rows: failingLocationRows.length
+        ? failingLocationRows.map((locationRow) => ({ label: String(locationRow.locationLabel ?? '—'), value: num(locationRow, 'count'), bad: true }))
         : [{ label: 'No synthetic failures', value: '0' }],
     },
   ]

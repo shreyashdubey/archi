@@ -1,7 +1,7 @@
 -- ============================================================================
--- fleet-rum-digest.nrql
+-- all-pages-realuser-digest.nrql
 -- JOB: queries that build the DAILY RUM DIGEST from REAL-USER telemetry.
---      Run by reference/lambda/fleet-digest-rum.lambda.ts
+--      Run by reference/lambda/all-pages-daily-digest-realuser.lambda.ts
 --
 -- MONITORED SURFACE: every fund-detail page at the URL pattern
 --   /investments/{slug}-growth
@@ -78,10 +78,12 @@ FACET cta
 SINCE 1 day ago LIMIT 25;
 
 -- 7) SYNTHETIC COVERAGE (long-tail / low-traffic pages) ----------------------
--- The rotating monitor for the /investments/*-growth template.
+-- The rotating fleet monitor(s) only — the 'rotating' suffix excludes the
+-- single-page SIMPLE monitor ('investments-growth-page-monitor'), whose
+-- high-frequency checks would otherwise skew the fleet success rate.
 SELECT uniqueCount(monitorName) AS monitors,
        percentage(count(*), WHERE result = 'SUCCESS') AS success_pct,
        filter(count(*), WHERE result = 'FAILED')      AS failed_checks
 FROM SyntheticCheck
-WHERE monitorName LIKE 'investments-growth-%'
+WHERE monitorName LIKE 'investments-growth-rotating%'
 SINCE 1 day ago;

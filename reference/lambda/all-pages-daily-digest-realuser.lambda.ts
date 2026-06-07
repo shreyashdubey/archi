@@ -13,7 +13,7 @@
 import {
   getSecrets, safeNrql, tableHtml, wrapEmail, sendEmail, num, val,
   type NrqlResult, type Cell,
-} from './shared-nerdgraph-email-utils'
+} from './report-shared'
 
 // What "the fleet" means, expressed two equivalent ways.
 const URL_PATTERN = '%/investments/%-growth%' // matches the monitored URLs
@@ -27,18 +27,22 @@ const ACTION_FILTER = `pageType = '${PAGE_TEMPLATE}'` // PageAction (ComponentRe
 const LIMITS = { renderSuccessPct: 99, renderMs: 800, loadS: 3, apiMs: 1500, apiErrPct: 2, redirectMs: 2500 }
 
 /** NerdGraph returns facet values under `facet` (string, or array for multi-facet). */
-const facetValue = (row: NrqlResult, position = 0): string => {
-  const facet = (row as any).facet
-  return String(Array.isArray(facet) ? facet[position] : facet ?? '—')
+const facetValue = (queryResultRow: NrqlResult, facetIndex = 0): string => {
+  const facetField = (queryResultRow as any).facet
+  const isMultiFacet = Array.isArray(facetField)
+  return String(isMultiFacet ? facetField[facetIndex] : facetField ?? '—')
 }
 
 export const handler = async (): Promise<void> => {
   const secrets = await getSecrets()
-  const apiKey = secrets.NR_API_KEY
-  const query = (nrql: string) => safeNrql(nrql, apiKey)
+  const newRelicApiKey = secrets.NR_API_KEY
+  const query = (nrqlQuery: string) => safeNrql(nrqlQuery, newRelicApiKey)
 
   // Fire every section's query in parallel.
-  const [summary, coreWebVitals, jsErrors, components, pages, renderFailures, apiCalls, ctaRedirects, synthetic] =
+  const [
+    fleetSummary, coreWebVitals, jsErrors, components, pageLoadTimes,
+    renderFailures, apiCalls, ctaRedirects, syntheticChecks,
+  ] =
     await Promise.all([
       query(`SELECT uniqueCount(fundSlug) AS pages, count(*) AS views, percentile(duration,75) AS loadP75
         FROM PageView WHERE ${BROWSER_FILTER}`),
@@ -59,14 +63,17 @@ export const handler = async (): Promise<void> => {
         FACET capture(requestUrl, r'https?://[^/]+(/[^?]*)') AS endpoint LIMIT 20`),
       query(`SELECT percentile(redirectMs,75) AS p75, percentile(redirectMs,95) AS p95, count(*) AS clicks
         FROM PageAction WHERE actionName='CtaRedirect' AND ${ACTION_FILTER} ${SINCE} FACET cta LIMIT 25`),
+      // 'rotating%' matches only the fleet sweep monitor(s); it excludes the
+      // single-page SIMPLE monitor ('investments-growth-page-monitor'), whose
+      // EVERY_MINUTE checks would otherwise dominate the fleet success rate.
       query(`SELECT percentage(count(*), WHERE result='SUCCESS') AS successPct,
         filter(count(*), WHERE result='FAILED') AS failed, uniqueCount(custom.checkedSlug) AS checked
-        FROM SyntheticCheck WHERE monitorName LIKE 'investments-growth-%' ${SINCE}`),
+        FROM SyntheticCheck WHERE monitorName LIKE 'investments-growth-rotating%' ${SINCE}`),
     ])
 
-  const summaryRow = summary[0]
+  const summaryRow = fleetSummary[0]
   const vitalsRow = coreWebVitals[0]
-  const syntheticRow = synthetic[0]
+  const syntheticRow = syntheticChecks[0]
 
   // -- Section 1: fleet summary --------------------------------------------
   const summaryTable = tableHtml('Fleet summary', ['Metric', 'Value'], [
@@ -82,37 +89,37 @@ export const handler = async (): Promise<void> => {
   const componentTable = tableHtml(
     'Component health — rendered? & latency',
     ['Component', 'Render success', 'Render p75', 'Errors', 'Missing'],
-    components.map((row): Cell[] => [
-      { v: facetValue(row) },
-      { v: num(row, 'renderOk', 1) + '%', bad: val(row, 'renderOk') < LIMITS.renderSuccessPct },
-      { v: num(row, 'renderP75') + ' ms', bad: val(row, 'renderP75') > LIMITS.renderMs },
-      { v: num(row, 'errors'), bad: val(row, 'errors') > 0 },
-      { v: num(row, 'missing'), bad: val(row, 'missing') > 0 },
+    components.map((componentRow): Cell[] => [
+      { v: facetValue(componentRow) },
+      { v: num(componentRow, 'renderOk', 1) + '%', bad: val(componentRow, 'renderOk') < LIMITS.renderSuccessPct },
+      { v: num(componentRow, 'renderP75') + ' ms', bad: val(componentRow, 'renderP75') > LIMITS.renderMs },
+      { v: num(componentRow, 'errors'), bad: val(componentRow, 'errors') > 0 },
+      { v: num(componentRow, 'missing'), bad: val(componentRow, 'missing') > 0 },
     ]),
   )
 
   // -- Section 3: top 10 slowest pages (sorted here, not in NRQL) ----------
+  const tenSlowestPages = [...pageLoadTimes]
+    .sort((firstPage, secondPage) => val(secondPage, 'loadP75') - val(firstPage, 'loadP75'))
+    .slice(0, 10)
   const slowestPagesTable = tableHtml(
     'Top 10 slowest pages',
     ['Fund slug', 'Load p75', 'Views'],
-    [...pages]
-      .sort((a, b) => val(b, 'loadP75') - val(a, 'loadP75'))
-      .slice(0, 10)
-      .map((row): Cell[] => [
-        { v: facetValue(row) },
-        { v: num(row, 'loadP75', 2) + ' s', bad: val(row, 'loadP75') > LIMITS.loadS },
-        { v: num(row, 'views') },
-      ]),
+    tenSlowestPages.map((pageRow): Cell[] => [
+      { v: facetValue(pageRow) },
+      { v: num(pageRow, 'loadP75', 2) + ' s', bad: val(pageRow, 'loadP75') > LIMITS.loadS },
+      { v: num(pageRow, 'views') },
+    ]),
   )
 
   // -- Section 4: top render failures (slug × component) ------------------
   const renderFailuresTable = tableHtml(
     'Top render failures (error / missing)',
     ['Fund slug', 'Component', 'Failures'],
-    renderFailures.map((row): Cell[] => [
-      { v: facetValue(row, 0) },
-      { v: facetValue(row, 1) },
-      { v: num(row, 'failures'), bad: true },
+    renderFailures.map((renderFailureRow): Cell[] => [
+      { v: facetValue(renderFailureRow, 0) },
+      { v: facetValue(renderFailureRow, 1) },
+      { v: num(renderFailureRow, 'failures'), bad: true },
     ]),
   )
 
@@ -120,11 +127,11 @@ export const handler = async (): Promise<void> => {
   const apiTable = tableHtml(
     'API performance',
     ['Endpoint', 'p95', 'Error %', 'Calls'],
-    apiCalls.map((row): Cell[] => [
-      { v: facetValue(row) },
-      { v: num(row, 'p95') + ' ms', bad: val(row, 'p95') > LIMITS.apiMs },
-      { v: num(row, 'errPct', 1) + '%', bad: val(row, 'errPct') > LIMITS.apiErrPct },
-      { v: num(row, 'calls') },
+    apiCalls.map((apiCallRow): Cell[] => [
+      { v: facetValue(apiCallRow) },
+      { v: num(apiCallRow, 'p95') + ' ms', bad: val(apiCallRow, 'p95') > LIMITS.apiMs },
+      { v: num(apiCallRow, 'errPct', 1) + '%', bad: val(apiCallRow, 'errPct') > LIMITS.apiErrPct },
+      { v: num(apiCallRow, 'calls') },
     ]),
   )
 
@@ -132,11 +139,11 @@ export const handler = async (): Promise<void> => {
   const ctaTable = tableHtml(
     'CTA → redirect timing',
     ['CTA', 'Redirect p75', 'Redirect p95', 'Clicks'],
-    ctaRedirects.map((row): Cell[] => [
-      { v: facetValue(row) },
-      { v: num(row, 'p75') + ' ms', bad: val(row, 'p75') > LIMITS.redirectMs },
-      { v: num(row, 'p95') + ' ms' },
-      { v: num(row, 'clicks') },
+    ctaRedirects.map((ctaRedirectRow): Cell[] => [
+      { v: facetValue(ctaRedirectRow) },
+      { v: num(ctaRedirectRow, 'p75') + ' ms', bad: val(ctaRedirectRow, 'p75') > LIMITS.redirectMs },
+      { v: num(ctaRedirectRow, 'p95') + ' ms' },
+      { v: num(ctaRedirectRow, 'clicks') },
     ]),
   )
 
@@ -147,12 +154,14 @@ export const handler = async (): Promise<void> => {
     [{ v: 'Failed checks' }, { v: num(syntheticRow, 'failed'), bad: val(syntheticRow, 'failed') > 0 }],
   ])
 
+  const reportingPeriodLabel = SINCE.replace('SINCE ', '') // e.g. "1 day ago"
   const html = wrapEmail(
     `📊 Daily fund-page fleet report — /investments/*-growth`,
-    `Template-wide health across ${num(summaryRow, 'pages')} pages for ${SINCE.replace('SINCE ', '')}.`,
+    `Template-wide health across ${num(summaryRow, 'pages')} pages for ${reportingPeriodLabel}.`,
     summaryTable + componentTable + slowestPagesTable + renderFailuresTable + apiTable + ctaTable + syntheticTable,
     secrets.NR_DASHBOARD_URL ?? 'https://one.newrelic.com',
     'Open fleet dashboard →',
+    { coverage: `${num(summaryRow, 'pages')} pages observed (RUM) · ${num(summaryRow, 'views')} pageviews · ${num(syntheticRow, 'checked')} synthetic slugs` },
   )
 
   await sendEmail({

@@ -8,7 +8,7 @@
 ## 0. Direct answer first
 
 There are **two ways** to get the numbers, and they cover different things. The earlier report
-(`fleet-digest-rum.lambda.ts`) uses model **A** only. For *complete per-page coverage of all 6000*,
+(`all-pages-daily-digest-realuser.lambda.ts`) uses model **A** only. For *complete per-page coverage of all 6000*,
 you add model **B**.
 
 | | **A — Passive (RUM)** | **B — Active (nightly crawler)** |
@@ -31,7 +31,7 @@ real-user CWV from RUM. The rest of this doc explains model B end-to-end.
 ```mermaid
 flowchart TB
     CRON["EventBridge cron<br/>(nightly 02:00)"] --> DISC
-    DISC["Discover URLs:<br/>GET slug API → 6,000 slugs"] --> SPLIT
+    DISC["Discover URLs:<br/>GET sitemap → 6,000 /investments/{slug}"] --> SPLIT
     SPLIT["Split into chunks<br/>(e.g. 120 × 50 slugs)"] --> MAP
     subgraph FANOUT["Step Functions Map / SQS fan-out (parallel workers)"]
       W1["Worker 1<br/>(Fargate/Lambda)<br/>Playwright"]
@@ -47,8 +47,10 @@ flowchart TB
 ```
 
 ### 1.1 Discover URLs
-The crawler calls the **same slug API** the site uses, getting the authoritative list of 6,000
-slugs → builds the 6,000 full URLs (`…/investments/{slug}?next=true`). No guessing, no stale list.
+The crawler fetches the site's **sitemap** (`SITEMAP_URL` = `…/api/amc-pdp/sitemap-details`) — the
+authoritative JSON list of ~6,000 fund URLs — and extracts the slug from each `/investments/{slug}-growth`
+entry (the monitored template; non-growth URLs are skipped), then builds the full URLs
+(`…/investments/{slug}?next=true`). No guessing, no stale list.
 
 ### 1.2 Fan-out (why you can't do it in one process)
 Rendering 6,000 pages in a real browser sequentially takes hours. So we **shard**: split the 6,000
@@ -154,6 +156,12 @@ FROM CrawlPageMetric WHERE pageType='mf-detail' FACET fundSlug SINCE 1 day ago L
 The email body still shows **aggregates + graphs + top-N** (6,000 rows in an email is unreadable);
 the **complete per-page matrix ships as a CSV attachment**.
 
+> **Scale caveat:** `FACET fundSlug LIMIT MAX` is capped at NerdGraph's facet limit (~10k) — fine for
+> ~6,000 pages, but it **silently keeps only the top facets** beyond that. The report guards this by
+> comparing the per-page row count to `uniqueCount(fundSlug)` and flagging truncation in the coverage
+> banner; past the cap, export the per-page set from the crawler's **S3 output** instead of re-querying
+> NRDB. And SES caps a raw email at **10 MB**, so a very large CSV should be **linked from S3**, not attached.
+
 ---
 
 ## 5. The graphs — how they're generated and put in the email
@@ -171,7 +179,7 @@ Pipeline (in the report Lambda):
    the v1 report can't carry inline images).
 4. Attach the per-page **CSV** as a normal attachment in the same MIME message.
 
-Code: `reference/lambda/email-charts-mime-builder.ts` (chart rendering + MIME builder + SendRawEmail).
+Code: `reference/lambda/rich-email-builder.ts` (chart rendering + MIME builder + SendRawEmail).
 
 Graphs included in the daily email:
 - **7-day trend** — fleet p75 load & LCP (line) → spot regressions over time.
@@ -226,5 +234,5 @@ Gmail/Outlook — unreliable). Server-rendered PNG + `cid` is the robust default
 |------|---------|
 | `reference/crawler/playwright-crawl-worker.ts` | Playwright worker: crawl a chunk, measure components/APIs/CTAs, push NR events |
 | `reference/crawler/crawl-fanout-orchestration.md` | Fan-out options (Step Functions Map / SQS / Fargate) + scheduling |
-| `reference/lambda/email-charts-mime-builder.ts` | Render PNG charts + build MIME + SES SendRawEmail (graphs in the mail) |
-| `reference/nrql/fleet-crawl-digest.nrql` | Aggregate + full per-page NRQL over the crawl events |
+| `reference/lambda/rich-email-builder.ts` | Render PNG charts + build MIME + SES SendRawEmail (graphs in the mail) |
+| `reference/nrql/all-pages-crawl-digest.nrql` | Aggregate + full per-page NRQL over the crawl events |

@@ -40,6 +40,7 @@ export async function barChartPng(title: string, bars: Series[], horizontal = fa
       ],
     },
     options: {
+    
       indexAxis: horizontal ? 'y' : 'x',
       plugins: { title: { display: true, text: title }, legend: { display: false } },
     },
@@ -86,39 +87,41 @@ export function buildMime(message: {
 }): string {
   const outerBoundary = 'mixed_' + message.subject.replace(/\W+/g, '').slice(0, 16)
   const relatedBoundary = 'rel_' + outerBoundary
-  const lines: string[] = []
+  const mimeLines: string[] = []
 
   // Top-level headers.
-  lines.push(`From: ${message.from}`)
-  lines.push(`To: ${message.to.join(', ')}`)
-  lines.push(`Subject: ${message.subject}`)
-  lines.push('MIME-Version: 1.0')
-  lines.push(`Content-Type: multipart/mixed; boundary="${outerBoundary}"`, '')
+  mimeLines.push(`From: ${message.from}`)
+  mimeLines.push(`To: ${message.to.join(', ')}`)
+  mimeLines.push(`Subject: ${message.subject}`)
+  mimeLines.push('MIME-Version: 1.0')
+  mimeLines.push(`Content-Type: multipart/mixed; boundary="${outerBoundary}"`, '')
 
   // Part 1 (related): the HTML body + its inline images.
-  lines.push(`--${outerBoundary}`)
-  lines.push(`Content-Type: multipart/related; boundary="${relatedBoundary}"`, '')
-  lines.push(`--${relatedBoundary}`)
-  lines.push('Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: 7bit', '')
-  lines.push(message.html, '')
-  for (const image of message.images) {
-    lines.push(`--${relatedBoundary}`)
-    lines.push('Content-Type: image/png', 'Content-Transfer-Encoding: base64')
-    lines.push(`Content-ID: <${image.cid}>`, `Content-Disposition: inline; filename="${image.cid}.png"`, '')
-    lines.push(image.png.toString('base64'), '')
+  mimeLines.push(`--${outerBoundary}`)
+  mimeLines.push(`Content-Type: multipart/related; boundary="${relatedBoundary}"`, '')
+  mimeLines.push(`--${relatedBoundary}`)
+  mimeLines.push('Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: 7bit', '')
+  mimeLines.push(message.html, '')
+  for (const inlineImage of message.images) {
+    const base64Png = inlineImage.png.toString('base64')
+    mimeLines.push(`--${relatedBoundary}`)
+    mimeLines.push('Content-Type: image/png', 'Content-Transfer-Encoding: base64')
+    mimeLines.push(`Content-ID: <${inlineImage.cid}>`, `Content-Disposition: inline; filename="${inlineImage.cid}.png"`, '')
+    mimeLines.push(base64Png, '')
   }
-  lines.push(`--${relatedBoundary}--`, '')
+  mimeLines.push(`--${relatedBoundary}--`, '')
 
   // Part 2 (optional): the per-page CSV attachment.
   if (message.csv) {
-    lines.push(`--${outerBoundary}`)
-    lines.push('Content-Type: text/csv; charset=UTF-8', 'Content-Transfer-Encoding: base64')
-    lines.push(`Content-Disposition: attachment; filename="${message.csv.filename}"`, '')
-    lines.push(Buffer.from(message.csv.content).toString('base64'), '')
+    const base64Csv = Buffer.from(message.csv.content).toString('base64')
+    mimeLines.push(`--${outerBoundary}`)
+    mimeLines.push('Content-Type: text/csv; charset=UTF-8', 'Content-Transfer-Encoding: base64')
+    mimeLines.push(`Content-Disposition: attachment; filename="${message.csv.filename}"`, '')
+    mimeLines.push(base64Csv, '')
   }
-  lines.push(`--${outerBoundary}--`, '')
+  mimeLines.push(`--${outerBoundary}--`, '')
 
-  return lines.join('\r\n')
+  return mimeLines.join('\r\n')
 }
 
 /** Send a pre-built raw MIME message via SES. */
