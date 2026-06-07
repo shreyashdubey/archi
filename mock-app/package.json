@@ -8,8 +8,10 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "crawl": "node scripts/crawl.mjs",
-    "report": "node scripts/report.mjs"
+    "crawl": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/crawl.mjs",
+    "crawl:browser": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/crawl-browser.mjs",
+    "report": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/report.mjs",
+    "generate-report": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/generate-report.mjs"
   },
   "dependencies": {
     "@mock/data": "*",

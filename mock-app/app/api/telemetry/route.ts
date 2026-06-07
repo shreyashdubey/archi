@@ -11,13 +11,15 @@ export const dynamic = 'force-dynamic'
  * The browser instrumentation POSTs events here (via navigator.sendBeacon).
  */
 export async function POST(request: Request) {
-  const events = await request.json().catch(() => [])
-  await appendEvents(events)
-  return NextResponse.json({ ok: true, received: Array.isArray(events) ? events.length : 0 })
+  const submittedEvents = await request.json().catch(() => [])
+  await appendEvents(submittedEvents)
+
+  const receivedCount = Array.isArray(submittedEvents) ? submittedEvents.length : 0
+  return NextResponse.json({ ok: true, received: receivedCount })
 }
 
 /** Quick health/debug check: how many events have been collected so far. */
 export async function GET() {
-  const events = await readEvents()
-  return NextResponse.json({ count: events.length })
+  const collectedEvents = await readEvents()
+  return NextResponse.json({ count: collectedEvents.length })
 }

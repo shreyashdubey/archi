@@ -2,7 +2,7 @@ import React from 'react'
 
 /** Simplified Bajaj-Finserv-style top bar (not instrumented). */
 export function TopNav() {
-  const links = ['Loans', 'All on EMI', 'Bajaj Mall', 'Cards', 'Investments', 'Insurance', 'Payments', 'Offers', 'Services']
+  const navLinkLabels = ['Loans', 'All on EMI', 'Bajaj Mall', 'Cards', 'Investments', 'Insurance', 'Payments', 'Offers', 'Services']
   return (
     <header style={{ background: '#02273f', color: '#fff' }}>
       <div style={{ maxWidth: 1280, margin: 'auto', display: 'flex', alignItems: 'center', gap: 16, padding: '10px 16px' }}>
@@ -16,8 +16,8 @@ export function TopNav() {
       </div>
       <nav style={{ background: '#0a3a5c' }}>
         <div style={{ maxWidth: 1280, margin: 'auto', display: 'flex', gap: 18, padding: '8px 16px', fontSize: 12.5, flexWrap: 'wrap' }}>
-          {links.map((l) => (
-            <span key={l} style={{ opacity: 0.9 }}>{l} ▾</span>
+          {navLinkLabels.map((linkLabel) => (
+            <span key={linkLabel} style={{ opacity: 0.9 }}>{linkLabel} ▾</span>
           ))}
         </div>
       </nav>

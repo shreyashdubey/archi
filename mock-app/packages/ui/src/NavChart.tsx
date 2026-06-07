@@ -31,13 +31,21 @@ export function NavChart({ fund }: { fund: Fund }) {
   const highestPrice = Math.max(...visiblePrices)
 
   // Map a data point (index, price) to SVG coordinates.
-  const toX = (index: number) =>
-    CHART_PADDING + (index / (visiblePrices.length - 1)) * (CHART_WIDTH - CHART_PADDING * 2)
-  const toY = (price: number) =>
+  const xForPointIndex = (pointIndex: number) =>
+    CHART_PADDING + (pointIndex / (visiblePrices.length - 1)) * (CHART_WIDTH - CHART_PADDING * 2)
+  const yForPrice = (price: number) =>
     CHART_HEIGHT - CHART_PADDING - ((price - lowestPrice) / (highestPrice - lowestPrice || 1)) * (CHART_HEIGHT - CHART_PADDING * 2)
 
-  const linePath = visiblePrices.map((price, index) => `${index === 0 ? 'M' : 'L'}${toX(index).toFixed(1)},${toY(price).toFixed(1)}`).join(' ')
-  const areaPath = `${linePath} L${toX(visiblePrices.length - 1).toFixed(1)},${CHART_HEIGHT - CHART_PADDING} L${toX(0).toFixed(1)},${CHART_HEIGHT - CHART_PADDING} Z`
+  const lastPointIndex = visiblePrices.length - 1
+  const chartBottomY = CHART_HEIGHT - CHART_PADDING
+
+  const linePath = visiblePrices
+    .map((price, pointIndex) => {
+      const command = pointIndex === 0 ? 'M' : 'L'
+      return `${command}${xForPointIndex(pointIndex).toFixed(1)},${yForPrice(price).toFixed(1)}`
+    })
+    .join(' ')
+  const areaPath = `${linePath} L${xForPointIndex(lastPointIndex).toFixed(1)},${chartBottomY} L${xForPointIndex(0).toFixed(1)},${chartBottomY} Z`
 
   return (
     <div data-nr-component="nav-chart" {...{ elementtiming: 'nav-chart' }} style={{ marginTop: 16 }}>

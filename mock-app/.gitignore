@@ -2,5 +2,6 @@ node_modules
 .next
 .data
 out
+tmp
 *.tsbuildinfo
 next-env.d.ts

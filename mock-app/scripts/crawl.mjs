@@ -2,10 +2,11 @@
  * scripts/crawl.mjs — the ACTUAL crawler for the mock.
  *
  * What it does (the "active monitoring" half of the architecture):
- *   1. asks the slug API for the list of pages (stand-in for all 6,000),
- *   2. visits every page, timing the load and checking which components rendered,
- *   3. times the calculator API for each page,
- *   4. pushes the results to the collector (/api/telemetry) as Crawl* events.
+ *   1. asks the slug API for the page list (discovered from the live sitemap),
+ *   2. samples SAMPLE_SIZE random pages (default 25; 0 = all, like prod),
+ *   3. visits each sampled page, timing the load and checking which components rendered,
+ *   4. times the calculator API for each page,
+ *   5. pushes the results to the collector (/api/telemetry) as Crawl* events.
  *
  * This is a fetch-based crawler: it reads the server-rendered HTML, so it can
  * measure load time, component presence and API timing without a browser. (For
@@ -13,9 +14,14 @@
  * events the page instrumentation sends while you browse — see the report.)
  *
  * Run:  npm run crawl        (needs `npm run dev` running)
- * Env:  BASE_URL (default http://localhost:3000)
+ * Env:  BASE_URL     (the mock's URL; auto-detected across ports 3000–3003 if unset)
+ *       PORT         (the mock's port, if you pin one; default probes 3000–3003)
+ *       SAMPLE_SIZE  (random pages to crawl; default 25, 0 = all ~6,000)
+ *       SAMPLE_SEED  (fix the random sample for a reproducible run; default: new each run)
  */
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000'
+import { resolveBaseUrl, discoverSlugs, sampleSlugs, getSampleConfig } from './lib/discover.mjs'
+
+let BASE_URL = process.env.BASE_URL || 'http://localhost:3000'
 const CONCURRENCY = 5
 
 // The components we expect on every fund page (must match data-nr-component=…).
@@ -24,7 +30,7 @@ const EXPECTED_COMPONENTS = [
   'fund-details-table', 'sip-calculator', 'risk-gauge',
 ]
 
-const round = (n) => Math.round(n)
+const round = (milliseconds) => Math.round(milliseconds)
 
 /** Crawl a single page and return the telemetry events it produced. */
 async function crawlPage(slug) {
@@ -32,17 +38,17 @@ async function crawlPage(slug) {
   const pageUrl = `${BASE_URL}/investments/${slug}?next=true`
 
   // 1. Load the page, timing the request.
-  const startedAt = performance.now()
+  const pageLoadStartedAt = performance.now()
   let html = ''
-  let httpStatus = 0
+  let pageHttpStatus = 0
   try {
-    const response = await fetch(pageUrl)
-    httpStatus = response.status
-    html = await response.text()
+    const pageResponse = await fetch(pageUrl)
+    pageHttpStatus = pageResponse.status
+    html = await pageResponse.text()
   } catch {
-    httpStatus = 0
+    pageHttpStatus = 0
   }
-  const loadMs = round(performance.now() - startedAt)
+  const loadMs = round(performance.now() - pageLoadStartedAt)
 
   // 2. Check which components are present in the rendered HTML.
   for (const component of EXPECTED_COMPONENTS) {
@@ -62,32 +68,32 @@ async function crawlPage(slug) {
     eventType: 'CrawlPageMetric',
     pageType: 'mf-detail',
     fundSlug: slug,
-    status: httpStatus >= 200 && httpStatus < 400 ? 'ok' : 'http_error',
-    httpStatus,
+    status: pageHttpStatus >= 200 && pageHttpStatus < 400 ? 'ok' : 'http_error',
+    httpStatus: pageHttpStatus,
     loadMs,
     jsErrors: 0,
   })
 
   // 4. Time the calculator API the page depends on.
-  const apiStartedAt = performance.now()
-  let apiStatus = 0
+  const apiCallStartedAt = performance.now()
+  let apiHttpStatus = 0
   try {
     const apiResponse = await fetch(`${BASE_URL}/api/funds/sip-calculate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ monthly: 25000, years: 2, rate: 15 }),
     })
-    apiStatus = apiResponse.status
+    apiHttpStatus = apiResponse.status
   } catch {
-    apiStatus = 0
+    apiHttpStatus = 0
   }
   events.push({
     eventType: 'CrawlApiMetric',
     pageType: 'mf-detail',
     fundSlug: slug,
     endpoint: '/api/funds/sip-calculate',
-    durationMs: round(performance.now() - apiStartedAt),
-    httpStatus: apiStatus,
+    durationMs: round(performance.now() - apiCallStartedAt),
+    httpStatus: apiHttpStatus,
   })
 
   return events
@@ -103,37 +109,42 @@ async function sendToCollector(events) {
 }
 
 async function main() {
+  BASE_URL = await resolveBaseUrl()
   console.log(`Crawler starting against ${BASE_URL}`)
 
-  // Discover the pages to crawl from the slug API.
-  const slugsResponse = await fetch(`${BASE_URL}/api/funds/slugs`)
-  const { slugs } = await slugsResponse.json()
-  console.log(`Discovered ${slugs.length} slugs`)
+  // Discover every page from the slug API (sitemap-backed), then sample a subset.
+  const { slugs: discovered, total, source } = await discoverSlugs(BASE_URL)
+  const { size, seed } = getSampleConfig()
+  const slugs = sampleSlugs(discovered, size, { seed })
+  const scope = size > 0 && size < total ? `sample of ${slugs.length}` : `all ${slugs.length}`
+  console.log(`Discovered ${total} slugs (source: ${source}) — crawling ${scope}`)
 
   // Crawl with a small concurrency pool (a shared cursor consumed by N workers).
-  let cursor = 0
-  let pagesDone = 0
+  let nextSlugIndex = 0
+  let pagesCrawled = 0
   const allEvents = []
 
   const worker = async () => {
-    while (cursor < slugs.length) {
-      const slug = slugs[cursor++]
-      const events = await crawlPage(slug)
-      allEvents.push(...events)
-      pagesDone++
-      process.stdout.write(`\r  crawled ${pagesDone}/${slugs.length}`)
+    while (nextSlugIndex < slugs.length) {
+      const slug = slugs[nextSlugIndex++]
+      const pageEvents = await crawlPage(slug)
+      allEvents.push(...pageEvents)
+      pagesCrawled++
+      process.stdout.write(`\r  crawled ${pagesCrawled}/${slugs.length}`)
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, slugs.length) }, worker))
+  const workerCount = Math.min(CONCURRENCY, slugs.length)
+  await Promise.all(Array.from({ length: workerCount }, worker))
 
   // Ship everything to the collector.
   await sendToCollector(allEvents)
-  console.log(`\nDone — ${pagesDone} pages, ${allEvents.length} events sent to the collector.`)
+  console.log(`\nDone — ${pagesCrawled} pages, ${allEvents.length} events sent to the collector.`)
   console.log('Next: npm run report')
 }
 
 main().catch((error) => {
   console.error('\nCrawl failed:', error.message)
-  console.error('Is the dev server running?  npm run dev')
+  console.error(`Could not reach the mock at ${BASE_URL}. Is \`npm run dev\` running?`)
+  console.error('(If port 3000 is busy, Next uses another port — set BASE_URL=http://localhost:<port> or PORT=<port>.)')
   process.exit(1)
 })

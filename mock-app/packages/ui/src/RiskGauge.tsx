@@ -11,21 +11,23 @@ const RADIUS = 90
 
 /** Risk & rating semicircular gauge with a needle at the fund's risk level. */
 export function RiskGauge({ fund }: { fund: Fund }) {
-  // A point on the gauge arc at the given angle (radians, measured from +x axis).
-  const pointAt = (angle: number) =>
-    `${(CENTER_X + RADIUS * Math.cos(angle)).toFixed(1)},${(CENTER_Y - RADIUS * Math.sin(angle)).toFixed(1)}`
+  // "x,y" string for the point on the gauge arc at the given angle
+  // (radians, measured from the +x axis).
+  const arcPointAtAngle = (angleRadians: number) =>
+    `${(CENTER_X + RADIUS * Math.cos(angleRadians)).toFixed(1)},${(CENTER_Y - RADIUS * Math.sin(angleRadians)).toFixed(1)}`
 
   // SVG path for one coloured segment of the 180° arc.
   const arcForSegment = (segmentIndex: number) => {
-    const startAngle = Math.PI - (segmentIndex / SEGMENT_COUNT) * Math.PI
-    const endAngle = Math.PI - ((segmentIndex + 1) / SEGMENT_COUNT) * Math.PI
-    return `M ${pointAt(startAngle)} A ${RADIUS} ${RADIUS} 0 0 1 ${pointAt(endAngle)}`
+    const segmentStartAngle = Math.PI - (segmentIndex / SEGMENT_COUNT) * Math.PI
+    const segmentEndAngle = Math.PI - ((segmentIndex + 1) / SEGMENT_COUNT) * Math.PI
+    return `M ${arcPointAtAngle(segmentStartAngle)} A ${RADIUS} ${RADIUS} 0 0 1 ${arcPointAtAngle(segmentEndAngle)}`
   }
 
   // Needle points at the middle of the fund's risk-level segment.
   const needleAngle = Math.PI - ((fund.riskLevelIndex + 0.5) / SEGMENT_COUNT) * Math.PI
-  const needleTipX = CENTER_X + (RADIUS - 18) * Math.cos(needleAngle)
-  const needleTipY = CENTER_Y - (RADIUS - 18) * Math.sin(needleAngle)
+  const needleLength = RADIUS - 18
+  const needleTipX = CENTER_X + needleLength * Math.cos(needleAngle)
+  const needleTipY = CENTER_Y - needleLength * Math.sin(needleAngle)
 
   return (
     <section data-nr-component="risk-gauge" {...{ elementtiming: 'risk-gauge' }} style={{ marginTop: 22, textAlign: 'center' }}>

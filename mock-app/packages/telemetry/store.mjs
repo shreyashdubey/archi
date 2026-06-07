@@ -23,25 +23,23 @@ async function ensureDataDir() {
 export async function appendEvents(events) {
   if (!Array.isArray(events) || events.length === 0) return
   await ensureDataDir()
-  const lines = events.map((event) => JSON.stringify(event)).join('\n') + '\n'
-  await appendFile(EVENTS_FILE, lines, 'utf8')
+  const newlineDelimitedJson = events.map((event) => JSON.stringify(event)).join('\n') + '\n'
+  await appendFile(EVENTS_FILE, newlineDelimitedJson, 'utf8')
 }
 
 /** Read every stored event back as an array of objects. */
 export async function readEvents() {
   if (!existsSync(EVENTS_FILE)) return []
   const fileContents = await readFile(EVENTS_FILE, 'utf8')
-  return fileContents
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line)
-      } catch {
-        return null // skip any truncated/partial line
-      }
-    })
-    .filter(Boolean)
+  const nonEmptyLines = fileContents.split('\n').filter(Boolean)
+  const parsedEvents = nonEmptyLines.map((line) => {
+    try {
+      return JSON.parse(line)
+    } catch {
+      return null // skip any truncated/partial line
+    }
+  })
+  return parsedEvents.filter(Boolean)
 }
 
 /** Empty the store (used by the crawler before a fresh run). */

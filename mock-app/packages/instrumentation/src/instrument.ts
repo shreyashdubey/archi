@@ -73,8 +73,9 @@ function sendToCollector(event: Attrs): void {
 /** Strip dynamic ids/query so endpoints group into one row in the report. */
 export function normalizeUrl(url: string): string {
   try {
-    const parsed = new URL(url, typeof location !== 'undefined' ? location.origin : 'http://localhost')
-    return parsed.pathname.replace(/\/[a-z0-9-]{12,}/gi, '/:id')
+    const baseOrigin = typeof location !== 'undefined' ? location.origin : 'http://localhost'
+    const parsedUrl = new URL(url, baseOrigin)
+    return parsedUrl.pathname.replace(/\/[a-z0-9-]{12,}/gi, '/:id')
   } catch {
     return url
   }
@@ -90,28 +91,29 @@ export function installFetchTiming(): void {
 
   const originalFetch = window.fetch.bind(window)
   window.fetch = async (...fetchArgs: Parameters<typeof fetch>) => {
-    const requestUrl = typeof fetchArgs[0] === 'string' ? fetchArgs[0] : (fetchArgs[0] as Request).url
+    const [requestInput] = fetchArgs
+    const requestUrl = typeof requestInput === 'string' ? requestInput : (requestInput as Request).url
 
     // Don't time (or re-report) calls to the collector itself.
     if (requestUrl.includes(COLLECTOR_URL)) return originalFetch(...fetchArgs)
 
-    const startTime = performance.now()
+    const requestStartedAtMs = performance.now()
     try {
       const response = await originalFetch(...fetchArgs)
       reportEvent('ApiCall', {
         endpoint: normalizeUrl(requestUrl),
-        durationMs: Math.round(performance.now() - startTime),
+        durationMs: Math.round(performance.now() - requestStartedAtMs),
         httpStatus: response.status,
       })
       return response
-    } catch (error) {
+    } catch (requestError) {
       reportEvent('ApiCall', {
         endpoint: normalizeUrl(requestUrl),
-        durationMs: Math.round(performance.now() - startTime),
+        durationMs: Math.round(performance.now() - requestStartedAtMs),
         httpStatus: 0,
-        error: String(error),
+        error: String(requestError),
       })
-      throw error
+      throw requestError
     }
   }
 }
@@ -129,13 +131,13 @@ export function installGlobals(): void {
   // Component render latency, reported by the browser's Element Timing API.
   if ('PerformanceObserver' in window) {
     try {
-      const elementTimingObserver = new PerformanceObserver((list) => {
-        for (const entry of list.getEntries() as any[]) {
-          if (entry.identifier) {
+      const elementTimingObserver = new PerformanceObserver((entryList) => {
+        for (const timingEntry of entryList.getEntries() as any[]) {
+          if (timingEntry.identifier) {
             reportEvent('ComponentRender', {
-              component: entry.identifier,
+              component: timingEntry.identifier,
               status: 'rendered',
-              renderMs: Math.round(entry.renderTime || entry.loadTime),
+              renderMs: Math.round(timingEntry.renderTime || timingEntry.loadTime),
             })
           }
         }
@@ -165,28 +167,28 @@ export function installGlobals(): void {
 
   // On the destination page, turn the stamped click into a redirect duration.
   window.addEventListener('load', () => {
-    let storedClick: string | null = null
+    let storedClickJson: string | null = null
     try {
-      storedClick = sessionStorage.getItem('nr_cta')
+      storedClickJson = sessionStorage.getItem('nr_cta')
     } catch {
       return
     }
-    if (!storedClick) return
+    if (!storedClickJson) return
     try {
       sessionStorage.removeItem('nr_cta')
     } catch {
       /* ignore */
     }
 
-    const click = JSON.parse(storedClick) as { cta: string; clickedAt: number; fromPath: string }
-    const elapsedSinceClick = click?.clickedAt ? Date.now() - click.clickedAt : Infinity
-    if (!click || elapsedSinceClick < 0 || elapsedSinceClick > 60_000) return // stale/unrelated nav
+    const storedClick = JSON.parse(storedClickJson) as { cta: string; clickedAt: number; fromPath: string }
+    const elapsedSinceClickMs = storedClick?.clickedAt ? Date.now() - storedClick.clickedAt : Infinity
+    if (!storedClick || elapsedSinceClickMs < 0 || elapsedSinceClickMs > 60_000) return // stale/unrelated nav
 
     const navigationTiming = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
-    const destinationReadyEpoch = performance.timeOrigin + (navigationTiming?.domContentLoadedEventEnd ?? 0)
-    const redirectMs = Math.round(destinationReadyEpoch - click.clickedAt)
+    const destinationReadyEpochMs = performance.timeOrigin + (navigationTiming?.domContentLoadedEventEnd ?? 0)
+    const redirectMs = Math.round(destinationReadyEpochMs - storedClick.clickedAt)
     if (redirectMs > 0) {
-      reportEvent('CtaRedirect', { cta: click.cta, redirectMs, fromPath: click.fromPath, toPath: location.pathname })
+      reportEvent('CtaRedirect', { cta: storedClick.cta, redirectMs, fromPath: storedClick.fromPath, toPath: location.pathname })
     }
   })
 }

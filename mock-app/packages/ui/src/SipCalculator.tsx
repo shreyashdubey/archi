@@ -78,7 +78,15 @@ export function SipCalculator() {
 }
 
 /** A single labelled range slider. */
-function Slider(props: {
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  valueLabel,
+  onValueChange,
+}: {
   label: string
   value: number
   min: number
@@ -90,16 +98,16 @@ function Slider(props: {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
-        <span style={{ color: '#444' }}>{props.label}</span>
-        <span style={{ fontWeight: 700, color: '#111', background: '#f3f3f8', borderRadius: 6, padding: '2px 10px' }}>{props.valueLabel}</span>
+        <span style={{ color: '#444' }}>{label}</span>
+        <span style={{ fontWeight: 700, color: '#111', background: '#f3f3f8', borderRadius: 6, padding: '2px 10px' }}>{valueLabel}</span>
       </div>
       <input
         type="range"
-        min={props.min}
-        max={props.max}
-        step={props.step}
-        value={props.value}
-        onChange={(event) => props.onValueChange(Number(event.target.value))}
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onValueChange(Number(event.target.value))}
         style={{ width: '100%', accentColor: '#5145d6' }}
       />
     </div>
