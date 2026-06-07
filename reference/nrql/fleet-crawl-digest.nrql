@@ -1,0 +1,81 @@
+-- ============================================================================
+-- fleet-crawl-digest.nrql
+-- JOB: queries that build the DAILY CRAWL DIGEST (complete, all-pages coverage).
+--      Run by reference/lambda/fleet-digest-crawl-graphs.lambda.ts
+--
+-- MONITORED SURFACE: the fund-detail template, served at the URL pattern
+--   /investments/{slug}-growth
+--   e.g. /investments/nippon-india-taiwan-equity-fund-g-growth
+--
+-- Crawl events are emitted by the nightly crawler for every page it visits and
+-- tagged pageType = 'mf-detail' (which IS the set of /investments/*-growth pages).
+-- Because EVERY page is crawled, these give true per-page averages.
+--   CrawlPageMetric      (1 per page)   : loadMs, lcp, jsErrors, httpStatus, status
+--   CrawlComponentMetric (1 per comp)   : component, status, renderMs
+--   CrawlApiMetric       (1 per API)    : endpoint, durationMs, httpStatus
+--   CrawlCtaMetric       (1 per CTA)    : cta, redirectMs
+-- ============================================================================
+
+-- 1) FLEET AVERAGES ACROSS EVERY CRAWLED /investments/*-growth PAGE ----------
+SELECT count(*)               AS pages_crawled,
+       average(loadMs)        AS avg_load_ms,
+       percentile(loadMs, 75) AS load_p75_ms,
+       average(lcp)           AS avg_lcp_ms,
+       sum(jsErrors)          AS total_js_errors,
+       filter(count(*), WHERE status != 'ok') AS non_ok_pages
+FROM CrawlPageMetric
+WHERE pageType = 'mf-detail'
+SINCE 1 day ago;
+
+-- Coverage check — confirm we crawled the whole template (flag if short).
+SELECT uniqueCount(fundSlug) AS unique_pages
+FROM CrawlPageMetric WHERE pageType = 'mf-detail' SINCE 1 day ago;
+
+-- 2) COMPONENT HEALTH ACROSS ALL PAGES (did it render + how fast) ------------
+SELECT percentage(count(*), WHERE status = 'rendered') AS render_success_pct,
+       percentile(renderMs, 75)                        AS render_p75_ms,
+       filter(count(*), WHERE status = 'error')        AS errors,
+       filter(count(*), WHERE status = 'missing')      AS missing
+FROM CrawlComponentMetric
+WHERE pageType = 'mf-detail'
+FACET component
+SINCE 1 day ago LIMIT 50;
+
+-- 3) FULL PER-PAGE TABLE — ONE ROW PER SLUG → CSV ATTACHMENT -----------------
+-- LIMIT MAX returns every /investments/*-growth page, not just the top N.
+SELECT average(loadMs) AS load_ms, max(lcp) AS lcp_ms, sum(jsErrors) AS js_errors,
+       latest(httpStatus) AS http_status
+FROM CrawlPageMetric
+WHERE pageType = 'mf-detail'
+FACET fundSlug
+SINCE 1 day ago LIMIT MAX;
+
+-- 4) API PERFORMANCE (how long did each API call take) -----------------------
+SELECT percentile(durationMs, 95) AS p95_ms,
+       percentage(count(*), WHERE httpStatus >= 400) AS error_pct,
+       count(*) AS calls
+FROM CrawlApiMetric
+WHERE pageType = 'mf-detail'
+FACET endpoint
+SINCE 1 day ago LIMIT 25;
+
+-- 5) CTA → REDIRECT TIMING (time to redirect after clicking a CTA) -----------
+SELECT percentile(redirectMs, 75) AS p75_ms, percentile(redirectMs, 95) AS p95_ms, count(*) AS samples
+FROM CrawlCtaMetric
+WHERE pageType = 'mf-detail'
+FACET cta
+SINCE 1 day ago LIMIT 25;
+
+-- 6) GRAPH SERIES (rendered as PNG charts in the email) ----------------------
+-- 6a) 7-day fleet load & LCP trend (line chart).
+SELECT percentile(loadMs, 75) AS load_p75, average(lcp) AS lcp
+FROM CrawlPageMetric WHERE pageType = 'mf-detail'
+SINCE 7 days ago TIMESERIES 1 day;
+
+-- 6b) Slowest pages (bar chart) — pull 100, sort to top-10 in the Lambda.
+SELECT average(loadMs) AS load_ms FROM CrawlPageMetric
+WHERE pageType = 'mf-detail' FACET fundSlug SINCE 1 day ago LIMIT 100;
+
+-- 6c) Day-over-day fleet regression.
+SELECT percentile(loadMs, 75) FROM CrawlPageMetric
+WHERE pageType = 'mf-detail' SINCE 1 day ago COMPARE WITH 1 day ago;

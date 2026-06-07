@@ -1,0 +1,29 @@
+{
+  "name": "mock-app",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "crawl": "node scripts/crawl.mjs",
+    "report": "node scripts/report.mjs"
+  },
+  "dependencies": {
+    "@mock/data": "*",
+    "@mock/instrumentation": "*",
+    "@mock/telemetry": "*",
+    "@mock/ui": "*",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.2",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "typescript": "5.4.5"
+  }
+}

@@ -1,0 +1,87 @@
+-- ============================================================================
+-- single-page-alerts-and-report.nrql
+-- JOB: (a) ALERT CONDITIONS that detect downtime/degradation of ONE critical
+--          fund page, and (b) ENRICHMENT queries the incident email runs.
+--      Used by reference/lambda/incident-alert-email.lambda.ts and
+--              reference/lambda/single-page-daily-digest.lambda.ts
+--
+-- MONITORED PAGE (example): the Nippon fund, URL pattern
+--   /investments/nippon-india-taiwan-equity-fund-g-growth
+--
+-- URL-pattern filters:
+--   - Server (Transaction)     → request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%'
+--   - Browser (PageView/Ajax)  → pageUrl    LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%'
+--   - Synthetics               → monitorName = 'investments-nippon-taiwan-growth-monitor'
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- (A) ALERT CONDITIONS  (each becomes a NRQL alert condition in the policy)
+-- ---------------------------------------------------------------------------
+
+-- [DOWNTIME] Synthetic failures across locations (>=2 locations = page down).
+SELECT count(*)
+FROM SyntheticCheck
+WHERE monitorName = 'investments-nippon-taiwan-growth-monitor'
+  AND result = 'FAILED';
+
+-- [DOWNTIME] Real traffic dropped to zero (the page is broken/unreachable).
+SELECT count(*)
+FROM Transaction
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';  -- threshold: < 1 for 5 min
+
+-- [DEGRADATION] Server error rate (%).
+SELECT percentage(count(*), WHERE error IS true)
+FROM Transaction
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';  -- threshold: > 5 for 5 min
+
+-- [DEGRADATION] Server-side p95 latency (ms).
+SELECT percentile(duration, 95)
+FROM Transaction
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';  -- threshold: > 2000 for 5 min
+
+-- [DEGRADATION] Real-user LCP p75 (Core Web Vital, seconds).
+SELECT percentile(largestContentfulPaint, 75)
+FROM PageViewTiming
+WHERE pageUrl LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';       -- threshold: > 2.5 for 10 min
+
+-- [DEGRADATION] Real-user INP p75 (responsiveness, ms).
+SELECT percentile(interactionToNextPaint, 75)
+FROM PageViewTiming
+WHERE pageUrl LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';       -- threshold: > 200 for 10 min
+
+-- [DEGRADATION] Apdex (server). Below 0.85 => degraded experience.
+SELECT apdex(duration, t: 0.5)
+FROM Transaction
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%';   -- threshold: < 0.85 for 10 min
+
+-- ---------------------------------------------------------------------------
+-- (B) REPORT / ENRICHMENT QUERIES  (run by the Lambda for the email)
+-- ---------------------------------------------------------------------------
+
+-- Uptime % over the period (digest headline).
+SELECT percentage(count(*), WHERE result = 'SUCCESS') AS uptime_pct
+FROM SyntheticCheck
+WHERE monitorName = 'investments-nippon-taiwan-growth-monitor'
+SINCE 1 day ago;
+
+-- Latency + error + apdex snapshot for the incident window.
+SELECT percentile(duration, 95) AS server_p95_ms,
+       percentage(count(*), WHERE error IS true) AS error_rate_pct,
+       apdex(duration, t: 0.5) AS apdex
+FROM Transaction
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%'
+SINCE 30 minutes ago;
+
+-- Core Web Vitals snapshot (real users).
+SELECT percentile(largestContentfulPaint, 75) AS lcp_p75_s,
+       percentile(interactionToNextPaint, 75) AS inp_p75_ms
+FROM PageViewTiming
+WHERE pageUrl LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%'
+SINCE 30 minutes ago;
+
+-- Top error messages driving the incident.
+SELECT count(*)
+FROM TransactionError
+WHERE request.uri LIKE '%/investments/nippon-india-taiwan-equity-fund-g-growth%'
+FACET error.message
+SINCE 30 minutes ago LIMIT 10;

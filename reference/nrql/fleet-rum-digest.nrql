@@ -1,0 +1,87 @@
+-- ============================================================================
+-- fleet-rum-digest.nrql
+-- JOB: queries that build the DAILY RUM DIGEST from REAL-USER telemetry.
+--      Run by reference/lambda/fleet-digest-rum.lambda.ts
+--
+-- MONITORED SURFACE: every fund-detail page at the URL pattern
+--   /investments/{slug}-growth
+--
+-- Filter conventions (URL-pattern based, as required):
+--   - Page/Ajax events have a real URL → filter by  pageUrl LIKE '%/investments/%-growth%'
+--   - Custom PageActions (ComponentRender/CtaRedirect) carry the pageType
+--     attribute the instrumentation sets for exactly this template → pageType = 'mf-detail'
+--   - fundSlug is the per-page drill-down dimension (thousands of values).
+-- ============================================================================
+
+-- 1) FLEET SUMMARY (real users) ----------------------------------------------
+SELECT uniqueCount(fundSlug) AS pages_with_traffic,
+       count(*)              AS pageviews,
+       percentile(duration, 75) AS load_p75_s
+FROM PageView
+WHERE pageUrl LIKE '%/investments/%-growth%'
+SINCE 1 day ago;
+
+-- Core Web Vitals (what users actually feel).
+SELECT percentile(largestContentfulPaint, 75) AS lcp_p75_s,
+       percentile(interactionToNextPaint, 75) AS inp_p75_ms,
+       percentile(cumulativeLayoutShift, 75)  AS cls_p75
+FROM PageViewTiming
+WHERE pageUrl LIKE '%/investments/%-growth%'
+SINCE 1 day ago;
+
+SELECT count(*) AS js_errors FROM JavaScriptError
+WHERE pageUrl LIKE '%/investments/%-growth%' SINCE 1 day ago;
+
+-- 2) COMPONENT HEALTH — did each component render + how fast ------------------
+-- ComponentRender is a custom PageAction; filter by the template attribute.
+SELECT percentage(count(*), WHERE status = 'rendered') AS render_success_pct,
+       filter(count(*), WHERE status = 'error')        AS errors,
+       filter(count(*), WHERE status = 'missing')      AS missing,
+       percentile(renderMs, 75)                        AS render_p75_ms
+FROM PageAction
+WHERE actionName = 'ComponentRender' AND pageType = 'mf-detail'
+FACET component
+SINCE 1 day ago LIMIT 50;
+
+-- 3) TOP SLOWEST PAGES (drill down by slug) ----------------------------------
+SELECT percentile(duration, 75) AS load_p75_s, count(*) AS views
+FROM PageView
+WHERE pageUrl LIKE '%/investments/%-growth%'
+FACET fundSlug
+SINCE 1 day ago LIMIT 100;   -- sort to top-10 in the Lambda
+
+-- 4) TOP RENDER FAILURES (slug × component) ----------------------------------
+SELECT count(*) AS failures
+FROM PageAction
+WHERE actionName = 'ComponentRender' AND pageType = 'mf-detail'
+  AND status IN ('error', 'missing')
+FACET fundSlug, component
+SINCE 1 day ago LIMIT 25;
+
+-- 5) API PERFORMANCE — how long did API calls take ---------------------------
+-- Auto-captured AjaxRequest; group by endpoint path (slug stripped out).
+SELECT percentile(timeToSettle, 95) AS api_p95_ms,
+       percentage(count(*), WHERE httpResponseCode >= 400) AS error_pct,
+       count(*) AS calls
+FROM AjaxRequest
+WHERE pageUrl LIKE '%/investments/%-growth%'
+FACET capture(requestUrl, r'https?://[^/]+(/[^?]*)') AS endpoint
+SINCE 1 day ago LIMIT 25;
+
+-- 6) CTA → REDIRECT TIMING — time to redirect after clicking a CTA -----------
+SELECT percentile(redirectMs, 75) AS redirect_p75_ms,
+       percentile(redirectMs, 95) AS redirect_p95_ms,
+       count(*)                   AS clicks
+FROM PageAction
+WHERE actionName = 'CtaRedirect' AND pageType = 'mf-detail'
+FACET cta
+SINCE 1 day ago LIMIT 25;
+
+-- 7) SYNTHETIC COVERAGE (long-tail / low-traffic pages) ----------------------
+-- The rotating monitor for the /investments/*-growth template.
+SELECT uniqueCount(monitorName) AS monitors,
+       percentage(count(*), WHERE result = 'SUCCESS') AS success_pct,
+       filter(count(*), WHERE result = 'FAILED')      AS failed_checks
+FROM SyntheticCheck
+WHERE monitorName LIKE 'investments-growth-%'
+SINCE 1 day ago;
